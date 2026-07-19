@@ -1,0 +1,36 @@
+# Grafana datasources, provisioned on startup.
+# The exemplarTraceIdDestinations block is what turns the "trace_id" exemplar
+# on the latency histogram into a clickable link to the trace in Tempo.
+apiVersion: 1
+
+deleteDatasources:
+  - name: Prometheus
+  - name: Tempo
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    uid: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    jsonData:
+      httpMethod: POST
+      exemplarTraceIdDestinations:
+        - name: trace_id
+          datasourceUid: tempo
+          urlDisplayLabel: View trace
+
+  - name: Tempo
+    type: tempo
+    uid: tempo
+    access: proxy
+    url: http://tempo:3200
+    jsonData:
+      httpMethod: GET
+      serviceMap:
+        datasourceUid: prometheus
+      nodeGraph:
+        enabled: true
+      tracesToMetrics:
+        datasourceUid: prometheus

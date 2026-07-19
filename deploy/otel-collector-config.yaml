@@ -1,0 +1,46 @@
+# OpenTelemetry Collector (contrib) configuration.
+# Receives OTLP traces from the app and forwards them to Tempo. Prometheus
+# scrapes the app and the collector directly, so no metrics pipeline is needed
+# here - this keeps the collector focused on being the trace ingestion buffer.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 256
+    spike_limit_mib: 64
+  batch:
+    timeout: 1s
+    send_batch_size: 1024
+
+exporters:
+  otlp/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+  debug:
+    verbosity: basic
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+service:
+  extensions: [health_check]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlp/tempo, debug]
+  telemetry:
+    metrics:
+      address: 0.0.0.0:8888
+    logs:
+      level: info

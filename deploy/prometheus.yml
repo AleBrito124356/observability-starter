@@ -1,0 +1,21 @@
+# Prometheus scrape configuration for the stack.
+# Exemplar storage is enabled via a command-line flag in docker-compose.yml,
+# which is what lets Grafana link a latency spike straight to its trace.
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: observability-starter-app
+    static_configs:
+      - targets: ["app:8000"]
+        labels:
+          service: observability-starter
+
+  - job_name: otel-collector
+    static_configs:
+      - targets: ["otel-collector:8888"]
+
+  - job_name: tempo
+    static_configs:
+      - targets: ["tempo:3200"]

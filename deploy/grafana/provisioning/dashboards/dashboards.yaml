@@ -1,0 +1,15 @@
+# Dashboard provider. Grafana loads every .json file in the options.path
+# directory as a dashboard; this yaml itself is ignored by the loader.
+apiVersion: 1
+
+providers:
+  - name: observability-starter
+    orgId: 1
+    folder: Observability
+    type: file
+    disableDeletion: false
+    editable: true
+    allowUiUpdates: true
+    options:
+      path: /etc/grafana/provisioning/dashboards
+      foldersFromFilesStructure: false
