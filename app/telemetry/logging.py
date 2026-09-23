@@ -78,8 +78,12 @@ def shared_processors(settings=None):
     ]
 
 
-def configure_logging(settings) -> None:
-    """Configure structlog and route stdlib logging through the same formatter."""
+def configure_logging(settings, *, stream=None) -> None:
+    """Configure structlog and route stdlib logging through the same formatter.
+
+    ``stream`` defaults to ``sys.stdout``; the offline demo passes an in-memory
+    buffer to read back the exact JSON lines production would print.
+    """
 
     processors = shared_processors(settings)
 
@@ -103,7 +107,7 @@ def configure_logging(settings) -> None:
         ],
     )
 
-    handler = logging.StreamHandler(sys.stdout)
+    handler = logging.StreamHandler(stream if stream is not None else sys.stdout)
     handler.setFormatter(formatter)
 
     root = logging.getLogger()

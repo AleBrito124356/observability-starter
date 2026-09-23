@@ -168,19 +168,21 @@ pytest
 
 ## Copy the telemetry into your own app
 
-Everything reusable lives in `app/telemetry/`. It has no dependency on the demo endpoints — the only thing to rename is the business counter `ORDERS_PROCESSED` in `metrics.py`. Drop the folder into your project and wire it up:
+Everything reusable lives in `app/telemetry/`. It imports nothing from the demo service (a test enforces that), and the demo's business counter lives outside it in `app/business_metrics.py`. Drop the folder into your project and wire it up with one call:
 
 ```python
-from app.telemetry.logging import RequestIDMiddleware, configure_logging
-from app.telemetry.metrics import PrometheusMiddleware, install_metrics_route
-from app.telemetry.tracing import configure_tracing
+from fastapi import FastAPI
+from app.config import Settings          # or any object with the same fields
+from app.telemetry import setup_telemetry
 
-configure_logging(settings)              # JSON logs + trace correlation
-app.add_middleware(RequestIDMiddleware)  # request id -> logs, span, response header
-app.add_middleware(PrometheusMiddleware) # RED metrics for every route
-install_metrics_route(app)               # GET /metrics, no redirect
-configure_tracing(app, settings)         # OTLP export + auto-instrumentation
+app = FastAPI()
+# ... your routes ...
+telemetry = setup_telemetry(app, Settings())
 ```
+
+`setup_telemetry` applies the pieces in the only order that makes correlation work — JSON logging, then the request-id middleware, then the RED metrics middleware and `GET /metrics`, then tracing last so the OpenTelemetry server span wraps the middleware and they can read the trace id. It returns a `Telemetry` handle (also on `app.state.telemetry`) whose `shutdown()` flushes buffered spans; call it from your lifespan. Each pillar can be switched off (`logging=False` when your host app owns logging config, `metrics=False`, `tracing=False`), and `span_processors=[...]` injects extra processors, which is how the tests and the demo capture spans in memory.
+
+The individual building blocks are still importable if you prefer to wire them by hand: `configure_logging`, `RequestIDMiddleware`, `PrometheusMiddleware`, `install_metrics_route` and `configure_tracing`.
 
 The middleware are deliberately **pure ASGI**, not `BaseHTTPMiddleware`, so they run in the same task as your endpoints and preserve the OpenTelemetry context — that is what makes the trace id available for exemplars and log correlation. Add manual spans around the work that matters, exactly as `app/services.py` does around `process_order`.
 

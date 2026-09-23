@@ -32,16 +32,36 @@ if not isinstance(_provider, TracerProvider):
     _provider.add_span_processor(SimpleSpanProcessor(MEMORY_EXPORTER))
     trace.set_tracer_provider(_provider)
 
+import io  # noqa: E402
+import json  # noqa: E402
+import logging  # noqa: E402
+
 import pytest  # noqa: E402
+import structlog  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
+from app.config import Settings  # noqa: E402
 from app.main import create_app  # noqa: E402
+
+_STDLIB_LOGGERS = ("uvicorn", "uvicorn.error", "uvicorn.access")
+
+
+def make_settings(**overrides) -> Settings:
+    """Settings that ignore any local .env file, so tests are hermetic."""
+
+    overrides.setdefault("otel_traces_exporter", "none")
+    return Settings(_env_file=None, **overrides)
 
 
 @pytest.fixture()
 def app():
     # enable_logging=False so tests keep full control over structlog config.
-    return create_app(enable_tracing=True, enable_metrics=True, enable_logging=False)
+    return create_app(
+        settings=make_settings(),
+        enable_tracing=True,
+        enable_metrics=True,
+        enable_logging=False,
+    )
 
 
 @pytest.fixture()
@@ -59,3 +79,37 @@ def _clear_spans():
     MEMORY_EXPORTER.clear()
     yield
     MEMORY_EXPORTER.clear()
+
+
+@pytest.fixture()
+def log_capture():
+    """Run the *production* logging setup into a buffer, then undo it.
+
+    Yields a function returning the JSON objects written so far. The global
+    stdlib and structlog configuration is restored afterwards so other tests
+    are unaffected.
+    """
+
+    root = logging.getLogger()
+    saved_root = (root.handlers[:], root.level)
+    saved_loggers = {
+        name: (logging.getLogger(name).handlers[:], logging.getLogger(name).propagate)
+        for name in _STDLIB_LOGGERS
+    }
+    saved_structlog = structlog.get_config()
+    buffer = io.StringIO()
+
+    def read() -> list[dict]:
+        return [json.loads(line) for line in buffer.getvalue().splitlines() if line.strip()]
+
+    read.buffer = buffer
+    try:
+        yield read
+    finally:
+        root.handlers, level = saved_root
+        root.setLevel(level)
+        for name, (handlers, propagate) in saved_loggers.items():
+            logging.getLogger(name).handlers = handlers
+            logging.getLogger(name).propagate = propagate
+        structlog.configure(**saved_structlog)
+        structlog.contextvars.clear_contextvars()

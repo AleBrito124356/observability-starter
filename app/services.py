@@ -17,8 +17,8 @@ from opentelemetry import context as otel_context
 from opentelemetry import trace
 from opentelemetry.trace import SpanKind, Status, StatusCode
 
+from app.business_metrics import ORDERS_PROCESSED
 from app.config import get_settings
-from app.telemetry.metrics import ORDERS_PROCESSED
 
 log = structlog.get_logger("app.services")
 tracer = trace.get_tracer("app.services")

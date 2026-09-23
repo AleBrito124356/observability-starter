@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from prometheus_client import REGISTRY, Counter, Gauge, Histogram
 
+from app import business_metrics
 from app.telemetry import metrics as m
 
 
@@ -11,7 +12,7 @@ def test_metric_objects_have_expected_types():
     assert isinstance(m.REQUESTS, Counter)
     assert isinstance(m.REQUEST_DURATION, Histogram)
     assert isinstance(m.IN_PROGRESS, Gauge)
-    assert isinstance(m.ORDERS_PROCESSED, Counter)
+    assert isinstance(business_metrics.ORDERS_PROCESSED, Counter)
 
 
 def test_core_series_are_registered():

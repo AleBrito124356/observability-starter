@@ -19,6 +19,9 @@ When a request runs inside a *sampled* trace, the latency observation carries a
 trace-id exemplar, which lets you jump from a spike on the latency panel to the
 exact trace that caused it. Unsampled requests get no exemplar, because their
 trace was never exported and the link would lead nowhere.
+
+This module knows nothing about the demo service: business metrics live next to
+the business code (``app/business_metrics.py``).
 """
 
 from __future__ import annotations
@@ -44,7 +47,6 @@ from starlette.routing import Match
 __all__ = [
     "CONTENT_TYPE_LATEST",
     "IN_PROGRESS",
-    "ORDERS_PROCESSED",
     "OTHER_METHOD",
     "REQUESTS",
     "REQUEST_DURATION",
@@ -80,12 +82,6 @@ IN_PROGRESS = Gauge(
     "http_requests_in_progress",
     "Number of HTTP requests currently being served, by method and route template.",
     ["method", "path"],
-)
-
-ORDERS_PROCESSED = Counter(
-    "orders_processed",
-    "Business orders processed, labelled by outcome.",
-    ["status"],
 )
 
 #: The request methods recorded as-is (RFC 9110 plus PATCH from RFC 5789).
