@@ -14,4 +14,6 @@ COPY app ./app
 
 EXPOSE 8000
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# --no-access-log: the app writes its own structured, trace-correlated
+# "request.completed" line per request, so uvicorn's text line would duplicate it.
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]

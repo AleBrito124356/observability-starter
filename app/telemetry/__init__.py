@@ -100,7 +100,7 @@ def setup_telemetry(
     if logging:
         configure_logging(settings, stream=log_stream)
 
-    app.add_middleware(RequestIDMiddleware)
+    app.add_middleware(RequestIDMiddleware, access_log=getattr(settings, "log_requests", True))
     if metrics:
         app.add_middleware(PrometheusMiddleware, excluded_paths=(metrics_path,))
         install_metrics_route(app, metrics_path)

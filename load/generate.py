@@ -7,6 +7,10 @@ side latency percentiles.
 Usage::
 
     python load/generate.py --base-url http://localhost:8000 --duration 120 --concurrency 20
+    observability-starter load --base-url http://localhost:8000 --duration 120
+
+The request mix (``ENDPOINTS`` + ``plan_request``) is shared with the offline
+demo (``python -m app.demo``), which drives the same traffic in-process.
 """
 
 from __future__ import annotations
@@ -14,8 +18,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import random
+import sys
 import time
 from collections import Counter
+from dataclasses import dataclass, field
 
 import httpx
 
@@ -28,10 +34,27 @@ ENDPOINTS: list[tuple[str, str, int]] = [
     ("GET", "/api/external", 1),
 ]
 
+#: How often each forced outcome is requested on GET /api/orders/{order_id}.
+ORDER_OUTCOMES: tuple[list[str], list[int]] = (["auto", "ok", "fail"], [3, 5, 2])
 
-def _weighted_choice() -> tuple[str, str]:
+
+@dataclass(frozen=True)
+class RequestSpec:
+    """One planned request: what to send, independent of the transport."""
+
+    method: str
+    template: str
+    path: str
+    params: dict[str, str] = field(default_factory=dict)
+    json: dict | None = None
+
+
+def _weighted_choice(rng: random.Random | None = None) -> tuple[str, str]:
+    """Pick ``(method, path template)`` from ``ENDPOINTS`` by weight."""
+
+    rng = rng or random
     total = sum(weight for *_, weight in ENDPOINTS)
-    roll = random.uniform(0, total)
+    roll = rng.uniform(0, total)
     upto = 0.0
     for method, path, weight in ENDPOINTS:
         upto += weight
@@ -40,46 +63,57 @@ def _weighted_choice() -> tuple[str, str]:
     return ENDPOINTS[0][0], ENDPOINTS[0][1]
 
 
+def plan_request(rng: random.Random | None = None) -> RequestSpec:
+    """Plan one request of the weighted mix (concrete path, params and body)."""
+
+    rng = rng or random
+    method, template = _weighted_choice(rng)
+    path = template.replace("{order_id}", f"ORD-{rng.randint(1000, 9999)}")
+    params: dict[str, str] = {}
+    body: dict | None = None
+    if template == "/api/orders/{order_id}":
+        choices, weights = ORDER_OUTCOMES
+        params["outcome"] = rng.choices(choices, weights=weights)[0]
+    if method == "POST":
+        body = {"items": [{"sku": "SKU-1", "quantity": rng.randint(1, 4)}]}
+    return RequestSpec(method=method, template=template, path=path, params=params, json=body)
+
+
+async def send_request(client: httpx.AsyncClient, base_url: str, spec: RequestSpec) -> httpx.Response:
+    """Send a planned request with ``client``."""
+
+    return await client.request(
+        spec.method, base_url + spec.path, params=spec.params or None, json=spec.json
+    )
+
+
 async def _worker(
     client: httpx.AsyncClient,
     base_url: str,
     stop_at: float,
     stats: Counter,
     latencies: list[float],
-    lock: asyncio.Lock,
+    rng: random.Random,
 ) -> None:
     while time.perf_counter() < stop_at:
-        method, path = _weighted_choice()
-        url = base_url + path.replace("{order_id}", f"ORD-{random.randint(1000, 9999)}")
-        params: dict[str, str] = {}
-        if path == "/api/orders/{order_id}":
-            params["outcome"] = random.choices(
-                ["auto", "ok", "fail"], weights=[3, 5, 2]
-            )[0]
-
+        spec = plan_request(rng)
         start = time.perf_counter()
         try:
-            if method == "POST":
-                response = await client.post(
-                    url,
-                    json={"items": [{"sku": "SKU-1", "quantity": random.randint(1, 4)}]},
-                )
-            else:
-                response = await client.get(url, params=params)
-            elapsed = time.perf_counter() - start
-            async with lock:
-                stats[response.status_code] += 1
-                latencies.append(elapsed)
+            response = await send_request(client, base_url, spec)
         except httpx.HTTPError:
-            async with lock:
-                stats["error"] += 1
+            stats["error"] += 1
+            continue
+        latencies.append(time.perf_counter() - start)
+        stats[response.status_code] += 1
 
 
 def _percentile(values: list[float], pct: float) -> float:
+    """Nearest-rank percentile of ``values`` (0.0 for an empty list)."""
+
     if not values:
         return 0.0
     ordered = sorted(values)
-    index = int(round((pct / 100.0) * (len(ordered) - 1)))
+    index = round((pct / 100.0) * (len(ordered) - 1))
     return ordered[index]
 
 
@@ -92,7 +126,7 @@ def _report(stats: Counter, latencies: list[float], duration: float) -> None:
     )
     print("-" * 52)
     for code in sorted(stats, key=str):
-        print(f"  {str(code):>7}: {stats[code]}")
+        print(f"  {code!s:>7}: {stats[code]}")
     if latencies:
         print("-" * 52)
         print(
@@ -104,33 +138,48 @@ def _report(stats: Counter, latencies: list[float], duration: float) -> None:
     print("=" * 52)
 
 
-async def run(base_url: str, duration: float, concurrency: int) -> None:
+async def run(
+    base_url: str, duration: float, concurrency: int, seed: int | None = None
+) -> tuple[Counter, list[float]]:
+    """Drive the mix against ``base_url`` and print the summary."""
+
     stats: Counter = Counter()
     latencies: list[float] = []
-    lock = asyncio.Lock()
+    rng = random.Random(seed)
     limits = httpx.Limits(max_connections=concurrency * 2, max_keepalive_connections=concurrency)
 
     print(f"load: {concurrency} workers hitting {base_url} for {duration:.0f}s ...")
     async with httpx.AsyncClient(timeout=10.0, limits=limits) as client:
         stop_at = time.perf_counter() + duration
         workers = [
-            asyncio.create_task(_worker(client, base_url, stop_at, stats, latencies, lock))
+            asyncio.create_task(_worker(client, base_url, stop_at, stats, latencies, rng))
             for _ in range(concurrency)
         ]
         await asyncio.gather(*workers)
 
     _report(stats, latencies, duration)
+    return stats, latencies
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Load generator for observability-starter.")
+def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.ArgumentParser:
+    parser = parser or argparse.ArgumentParser(
+        description="Load generator for observability-starter."
+    )
     parser.add_argument("--base-url", default="http://localhost:8000", help="Service base URL.")
     parser.add_argument("--duration", type=float, default=60.0, help="Seconds to run.")
     parser.add_argument("--concurrency", type=int, default=10, help="Concurrent workers.")
-    args = parser.parse_args()
+    parser.add_argument("--seed", type=int, default=None, help="Seed for a repeatable mix.")
+    return parser
 
-    asyncio.run(run(args.base_url.rstrip("/"), args.duration, args.concurrency))
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    if args.duration <= 0 or args.concurrency <= 0:
+        print("--duration and --concurrency must be positive", file=sys.stderr)
+        return 2
+    asyncio.run(run(args.base_url.rstrip("/"), args.duration, args.concurrency, args.seed))
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

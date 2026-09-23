@@ -62,7 +62,7 @@ def test_setup_telemetry_can_skip_pillars():
 
 
 def test_telemetry_package_does_not_import_the_demo_service():
-    pattern = re.compile(r"^\s*(from|import)\s+app\.(services|main|business_metrics|demo)\b", re.M)
+    pattern = re.compile(r"^\s*(from|import)\s+app\.(services|main|business_metrics|demo)\b", re.MULTILINE)
     offenders = [
         path.name for path in TELEMETRY_DIR.glob("*.py") if pattern.search(path.read_text("utf-8"))
     ]

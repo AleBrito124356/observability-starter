@@ -70,30 +70,33 @@ async def process_order(
         else:
             failed = random.random() < settings.failure_rate
 
-        if failed:
-            error = DependencyError(f"inventory service rejected order {order_id}")
-            span.set_status(Status(StatusCode.ERROR, "inventory reservation failed"))
-            span.record_exception(error)
-            ORDERS_PROCESSED.labels(status="failed").inc()
-            log.warning("order.failed", order_id=order_id, db_latency_ms=db_latency_ms)
-            raise error
+        if not failed:
+            total = round(random.uniform(10.0, 500.0), 2)
+            span.set_attribute("order.total_usd", total)
+            span.set_status(Status(StatusCode.OK))
+            ORDERS_PROCESSED.labels(status="success").inc()
+            log.info(
+                "order.processed",
+                order_id=order_id,
+                total_usd=total,
+                db_latency_ms=db_latency_ms,
+            )
+            return {
+                "order_id": order_id,
+                "status": "confirmed",
+                "total_usd": total,
+                "db_latency_ms": db_latency_ms,
+            }
 
-        total = round(random.uniform(10.0, 500.0), 2)
-        span.set_attribute("order.total_usd", total)
-        span.set_status(Status(StatusCode.OK))
-        ORDERS_PROCESSED.labels(status="success").inc()
-        log.info(
-            "order.processed",
-            order_id=order_id,
-            total_usd=total,
-            db_latency_ms=db_latency_ms,
-        )
-        return {
-            "order_id": order_id,
-            "status": "confirmed",
-            "total_usd": total,
-            "db_latency_ms": db_latency_ms,
-        }
+        error = DependencyError(f"inventory service rejected order {order_id}")
+        span.set_status(Status(StatusCode.ERROR, "inventory reservation failed"))
+        span.record_exception(error)
+        ORDERS_PROCESSED.labels(status="failed").inc()
+        log.warning("order.failed", order_id=order_id, db_latency_ms=db_latency_ms)
+
+    # Raised after the span has ended: raising inside the `with` would make the
+    # SDK record the exception a second time and overwrite the status message.
+    raise error
 
 
 async def send_confirmation(order_id: str, parent_context=None) -> None:

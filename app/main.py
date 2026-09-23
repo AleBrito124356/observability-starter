@@ -172,22 +172,28 @@ def create_app(
                 client = await stack.enter_async_context(
                     httpx.AsyncClient(timeout=UPSTREAM_TIMEOUT_SECONDS)
                 )
+            failure: httpx.HTTPError | None = None
             with tracer.start_as_current_span("external.aggregate") as span:
                 span.set_attribute("upstream.url", settings.upstream_url)
                 try:
                     response = await client.get(settings.upstream_url)
                 except httpx.HTTPError as exc:
+                    failure = exc
                     span.set_status(Status(StatusCode.ERROR, "upstream request failed"))
                     span.record_exception(exc)
                     log.warning(
                         "upstream.failed", upstream_url=settings.upstream_url, error=repr(exc)
                     )
-                    raise HTTPException(status_code=502, detail="upstream request failed") from exc
-                span.set_attribute("upstream.status_code", response.status_code)
-                return {
-                    "upstream_url": settings.upstream_url,
-                    "upstream_status": response.status_code,
-                }
+                else:
+                    span.set_attribute("upstream.status_code", response.status_code)
+            # Raise outside the span so the SDK does not record a second
+            # (HTTPException) event and overwrite the status message.
+            if failure is not None:
+                raise HTTPException(status_code=502, detail="upstream request failed") from failure
+            return {
+                "upstream_url": settings.upstream_url,
+                "upstream_status": response.status_code,
+            }
 
     # Telemetry goes on last, after the routes exist, and in one call that
     # applies logging -> request id -> metrics -> tracing in the right order.

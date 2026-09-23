@@ -57,6 +57,21 @@ flowchart LR
 
 ---
 
+## See the pivot in ten seconds, offline
+
+No Docker, no collector, no network: the demo builds the real app in-process, drives a seeded request mix through it with `httpx.ASGITransport`, and walks the same path you would click through in Grafana.
+
+```bash
+python -m app.demo --requests 200 --seed 7        # or --json for a machine-readable report
+```
+
+1. **Metrics** — a RED table per route read from the live Prometheus registry, with p50/p95/p99 computed by a Python port of PromQL's `histogram_quantile` (so the numbers match what the dashboard would plot, bucket interpolation included).
+2. **Exemplar** — the `trace_id` attached to the slowest populated latency bucket (the *latency pivot*) and to the slowest 5xx bucket (the *error pivot*).
+3. **Trace** — that trace as an ASCII waterfall: span tree, offsets, durations, kinds, key attributes, `!! ERROR` marks and recorded exceptions.
+4. **Logs** — every JSON log line carrying that `trace_id`, exactly as the production logging pipeline wrote it.
+
+`/api/external`'s upstream call is served in-process too, in a fresh context, so its trace shows the CLIENT span and a SERVER span whose parent arrived over the `traceparent` header — propagation, not shared memory. Flags: `--requests`, `--concurrency`, `--seed`, `--failure-rate`, `--json`.
+
 ## Quickstart
 
 ```bash

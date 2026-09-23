@@ -11,7 +11,11 @@ Two ideas do the heavy lifting:
   A client-supplied id is honoured only when it is a short token
   (``[A-Za-z0-9._:-]{1,128}``); anything else - a 6 KB string, spaces, quotes,
   JSON - is replaced by a fresh id so it cannot bloat or forge log lines and
-  is never reflected back in a response header.
+  is never reflected back in a response header. It also writes one structured
+  ``request.completed`` access-log line per request (method, raw path, route
+  template, status, duration), emitted *inside* the server span so it carries
+  the trace id - every request, even one whose handler logs nothing, has at
+  least one log line you can reach from its trace.
 
 Both structlog and the standard library (uvicorn's loggers) are routed through
 one ``ProcessorFormatter`` so all output is consistent JSON.
@@ -22,6 +26,7 @@ from __future__ import annotations
 import logging
 import re
 import sys
+import time
 from uuid import uuid4
 
 import structlog
@@ -29,6 +34,12 @@ from opentelemetry import trace
 from starlette.datastructures import Headers, MutableHeaders
 
 DEFAULT_REQUEST_ID_HEADER = "X-Request-ID"
+
+#: Paths left out of the access log by default: probes and scrapes would drown
+#: the interesting lines (Prometheus alone scrapes every few seconds).
+DEFAULT_ACCESS_LOG_EXCLUDE = ("/health", "/metrics", "/metrics/")
+
+access_log = structlog.get_logger("app.access")
 
 #: What an acceptable incoming request id looks like: UUIDs (with or without
 #: dashes), ULIDs, W3C trace ids and most load-balancer ids all fit.
@@ -123,11 +134,27 @@ def configure_logging(settings, *, stream=None) -> None:
 
 
 class RequestIDMiddleware:
-    """Pure ASGI middleware that attaches a request id to logs, spans and headers."""
+    """Pure ASGI middleware: request id on logs, span and headers, plus an access log.
 
-    def __init__(self, app, header_name: str = DEFAULT_REQUEST_ID_HEADER) -> None:
+    Args:
+        app: the next ASGI app.
+        header_name: request/response header carrying the id.
+        access_log: write one ``request.completed`` line per request.
+        access_log_exclude: exact paths that get no access-log line.
+    """
+
+    def __init__(
+        self,
+        app,
+        header_name: str = DEFAULT_REQUEST_ID_HEADER,
+        *,
+        access_log: bool = True,
+        access_log_exclude: tuple[str, ...] = DEFAULT_ACCESS_LOG_EXCLUDE,
+    ) -> None:
         self.app = app
         self.header_name = header_name
+        self.access_log = access_log
+        self.access_log_exclude = frozenset(access_log_exclude)
 
     async def __call__(self, scope, receive, send) -> None:
         if scope["type"] != "http":
@@ -137,20 +164,43 @@ class RequestIDMiddleware:
         incoming = Headers(scope=scope)
         request_id = sanitize_request_id(incoming.get(self.header_name))
 
-        structlog.contextvars.bind_contextvars(request_id=request_id)
-
         span = trace.get_current_span()
         span_ctx = span.get_span_context()
         if span_ctx is not None and span_ctx.is_valid:
             span.set_attribute("request.id", request_id)
 
+        status_code = 500
+        start = time.perf_counter()
+
         async def send_wrapper(message) -> None:
+            nonlocal status_code
             if message["type"] == "http.response.start":
+                status_code = message["status"]
                 headers = MutableHeaders(scope=message)
                 headers.append(self.header_name, request_id)
             await send(message)
 
-        try:
-            await self.app(scope, receive, send_wrapper)
-        finally:
-            structlog.contextvars.unbind_contextvars("request_id")
+        # bound_contextvars restores the previous value on exit, so a request
+        # served in-process from inside another one (a mounted sub-app, an
+        # ASGITransport call) does not wipe the outer request's id.
+        with structlog.contextvars.bound_contextvars(request_id=request_id):
+            try:
+                await self.app(scope, receive, send_wrapper)
+            finally:
+                if self.access_log and scope.get("path") not in self.access_log_exclude:
+                    self._log_access(scope, status_code, time.perf_counter() - start)
+
+    @staticmethod
+    def _log_access(scope, status_code: int, elapsed: float) -> None:
+        # The router stores the matched route on the (shared) scope, so after
+        # the call we get the template for free, without re-matching.
+        route = getattr(scope.get("route"), "path", None)
+        emit = access_log.warning if status_code >= 500 else access_log.info
+        emit(
+            "request.completed",
+            method=scope.get("method"),
+            path=scope.get("path"),
+            route=route,
+            status_code=status_code,
+            duration_ms=round(elapsed * 1000, 2),
+        )

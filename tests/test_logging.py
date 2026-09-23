@@ -92,3 +92,73 @@ def test_request_id_lands_on_the_server_span(client, span_exporter):
     client.get("/api/orders/ORD-5?outcome=ok", headers={"X-Request-ID": "trace-me-123"})
     server = next(s for s in span_exporter.get_finished_spans() if s.kind.name == "SERVER")
     assert server.attributes.get("request.id") == "trace-me-123"
+
+
+# --- The structured access log -------------------------------------------------
+
+
+def _app_logging_to(buffer, **overrides):
+    from app.main import create_app
+    from app.telemetry.logging import configure_logging
+    from tests.conftest import make_settings
+
+    settings = make_settings(**overrides)
+    configure_logging(settings, stream=buffer)
+    return create_app(settings=settings, enable_logging=False)
+
+
+def test_access_log_line_is_structured_and_correlated(log_capture, span_exporter):
+    from fastapi.testclient import TestClient
+
+    client = TestClient(_app_logging_to(log_capture.buffer))
+    client.get("/api/orders/ORD-77?outcome=ok", headers={"X-Request-ID": "acc-1"})
+    client.get("/health")
+    client.get("/metrics")
+
+    access = [e for e in log_capture() if e.get("event") == "request.completed"]
+    assert len(access) == 1, "probes and scrapes are not access-logged"
+    line = access[0]
+    server = next(s for s in span_exporter.get_finished_spans() if s.kind.name == "SERVER")
+    assert line["route"] == "/api/orders/{order_id}"
+    assert line["path"] == "/api/orders/ORD-77"
+    assert line["method"] == "GET"
+    assert line["status_code"] == 200
+    assert line["duration_ms"] > 0
+    assert line["request_id"] == "acc-1"
+    assert line["trace_id"] == format(server.context.trace_id, "032x")
+
+
+def test_access_log_marks_5xx_as_warning(log_capture):
+    from fastapi.testclient import TestClient
+
+    TestClient(_app_logging_to(log_capture.buffer)).get("/api/orders/ORD-1?outcome=fail")
+    line = next(e for e in log_capture() if e.get("event") == "request.completed")
+    assert line["status_code"] == 503
+    assert line["level"] == "warning"
+
+
+def test_access_log_can_be_turned_off(log_capture):
+    from fastapi.testclient import TestClient
+
+    TestClient(_app_logging_to(log_capture.buffer, log_requests=False)).get("/")
+    assert not [e for e in log_capture() if e.get("event") == "request.completed"]
+
+
+async def test_nested_in_process_request_keeps_the_outer_request_id(log_capture):
+    import httpx
+
+    from app.demo.runner import NetworkLikeASGITransport
+
+    app = _app_logging_to(log_capture.buffer, upstream_url="http://upstream.internal/")
+    # A plain ASGITransport shares the caller's context: the worst case for
+    # context-local state such as the bound request id.
+    app.state.http_client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app))
+    async with httpx.AsyncClient(
+        transport=NetworkLikeASGITransport(app=app), base_url="http://svc"
+    ) as client:
+        await client.get("/api/external", headers={"X-Request-ID": "outer-1"})
+    await app.state.http_client.aclose()
+
+    lines = {e["path"]: e for e in log_capture() if e.get("event") == "request.completed"}
+    assert lines["/api/external"]["request_id"] == "outer-1"
+    assert lines["/"]["request_id"] != "outer-1"

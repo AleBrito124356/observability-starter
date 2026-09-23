@@ -91,6 +91,9 @@ class Settings(BaseSettings):
     # --- Logging ---
     log_level: str = "INFO"
     log_json: bool = True
+    # One structured, trace-correlated "request.completed" line per request.
+    # (Run uvicorn with --no-access-log to avoid its plain-text duplicate.)
+    log_requests: bool = True
 
     # --- Demo behaviour knobs ---
     # URL the /api/external endpoint calls to exercise httpx instrumentation.
