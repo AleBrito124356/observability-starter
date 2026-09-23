@@ -47,6 +47,13 @@ from starlette.datastructures import Headers, MutableHeaders
 from app.config import parse_exporter_list
 from app.telemetry.resource import build_resource
 
+try:
+    # Older SDKs: Logger.emit() needs the SDK LogRecord, which carries the
+    # resource itself; handing it the API LogRecord drops the record at export.
+    from opentelemetry.sdk._logs import LogRecord as _SDKLogRecord
+except ImportError:  # newer SDKs take the API LogRecord and add the resource
+    _SDKLogRecord = None
+
 DEFAULT_REQUEST_ID_HEADER = "X-Request-ID"
 
 #: Paths left out of the access log by default: probes and scrapes would drown
@@ -237,16 +244,19 @@ class OTelLogHandler(logging.Handler):
         try:
             body, attributes = _body_and_attributes(record)
             severity_number, severity_text = _severity(record.levelno)
-            self.logger_provider.get_logger(record.name).emit(
-                LogRecord(
-                    timestamp=int(record.created * 1e9),
-                    context=otel_context.get_current(),
-                    severity_number=severity_number,
-                    severity_text=severity_text,
-                    body=body,
-                    attributes=attributes,
-                )
-            )
+            logger = self.logger_provider.get_logger(record.name)
+            fields = {
+                "timestamp": int(record.created * 1e9),
+                "context": otel_context.get_current(),
+                "severity_number": severity_number,
+                "severity_text": severity_text,
+                "body": body,
+                "attributes": attributes,
+            }
+            if _SDKLogRecord is not None:
+                logger.emit(_SDKLogRecord(resource=logger.resource, **fields))
+            else:
+                logger.emit(LogRecord(**fields))
         except Exception:  # noqa: BLE001 - a log handler must never raise
             self.handleError(record)
 

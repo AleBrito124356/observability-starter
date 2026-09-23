@@ -37,11 +37,23 @@ from app.telemetry.resource import build_resource
 __all__ = [
     "build_otlp_span_exporter",
     "build_resource",
+    "build_sampler",
     "build_span_exporters",
     "configure_tracing",
 ]
 
 _logger = logging.getLogger(__name__)
+
+
+def build_sampler(settings) -> ParentBased:
+    """Head sampling: keep ``TRACE_SAMPLE_RATIO`` of new traces, follow the parent.
+
+    ``ParentBased`` keeps or drops a whole trace as a unit: a request that
+    arrives with a sampled ``traceparent`` is always recorded, an unsampled one
+    never is, and only root spans roll the dice.
+    """
+
+    return ParentBased(root=TraceIdRatioBased(settings.trace_sample_ratio))
 
 
 def _otlp_endpoint(settings) -> str:
@@ -148,8 +160,9 @@ def configure_tracing(
         for processor in span_processors or ():
             provider.add_span_processor(processor)
     else:
-        sampler = ParentBased(root=TraceIdRatioBased(settings.trace_sample_ratio))
-        provider = TracerProvider(resource=build_resource(settings), sampler=sampler)
+        provider = TracerProvider(
+            resource=build_resource(settings), sampler=build_sampler(settings)
+        )
         owned = True
 
         if span_processors:

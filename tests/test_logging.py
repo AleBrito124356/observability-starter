@@ -162,3 +162,73 @@ async def test_nested_in_process_request_keeps_the_outer_request_id(log_capture)
     lines = {e["path"]: e for e in log_capture() if e.get("event") == "request.completed"}
     assert lines["/api/external"]["request_id"] == "outer-1"
     assert lines["/"]["request_id"] != "outer-1"
+
+
+# --- configure_logging, end to end on stdout ----------------------------------
+
+
+def test_configure_logging_writes_one_json_object_per_line(log_capture, capsys):
+    import json
+    import logging
+
+    from app.telemetry.logging import configure_logging
+    from tests.conftest import make_settings
+
+    configure_logging(make_settings())  # default stream: sys.stdout
+    log = structlog.get_logger("stdout-test")
+    tracer = trace.get_tracer("test")
+    with structlog.contextvars.bound_contextvars(request_id="req-json-1"):
+        with tracer.start_as_current_span("unit") as span:
+            ctx = span.get_span_context()
+            log.info("structlog.event", answer=42)
+            logging.getLogger("uvicorn.error").warning("uvicorn says %s", "hi")
+
+    lines = [line for line in capsys.readouterr().out.splitlines() if line.strip()]
+    entries = [json.loads(line) for line in lines]  # every line is a JSON object
+    by_event = {entry["event"]: entry for entry in entries}
+    for event in ("structlog.event", "uvicorn says hi"):
+        entry = by_event[event]
+        assert entry["trace_id"] == format(ctx.trace_id, "032x")
+        assert entry["span_id"] == format(ctx.span_id, "016x")
+        assert entry["request_id"] == "req-json-1"
+        assert "timestamp" in entry
+    assert by_event["structlog.event"]["answer"] == 42
+    assert by_event["uvicorn says hi"]["level"] == "warning"
+
+
+def test_uvicorn_loggers_propagate_to_the_json_handler(log_capture):
+    import logging
+
+    from app.telemetry.logging import configure_logging
+    from tests.conftest import make_settings
+
+    logging.getLogger("uvicorn.access").handlers = [logging.NullHandler()]
+    logging.getLogger("uvicorn.access").propagate = False
+    configure_logging(make_settings(), stream=log_capture.buffer)
+    for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+        assert logging.getLogger(name).handlers == []
+        assert logging.getLogger(name).propagate is True
+    logging.getLogger("uvicorn.access").info("GET / 200")
+    assert log_capture()[-1]["event"] == "GET / 200"
+
+
+def test_log_level_setting_filters_records(log_capture):
+    from app.telemetry.logging import configure_logging
+    from tests.conftest import make_settings
+
+    configure_logging(make_settings(log_level="WARNING"), stream=log_capture.buffer)
+    log = structlog.get_logger("levels")
+    log.info("dropped")
+    log.warning("kept")
+    assert [entry["event"] for entry in log_capture()] == ["kept"]
+
+
+def test_console_renderer_when_json_is_off(log_capture):
+    from app.telemetry.logging import configure_logging
+    from tests.conftest import make_settings
+
+    configure_logging(make_settings(log_json=False), stream=log_capture.buffer)
+    structlog.get_logger("pretty").info("human.readable", k="v")
+    text = log_capture.buffer.getvalue()
+    assert "human.readable" in text
+    assert not text.lstrip().startswith("{")
