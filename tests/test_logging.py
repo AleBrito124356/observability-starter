@@ -61,3 +61,34 @@ def test_no_trace_context_outside_a_span():
 def test_add_trace_context_is_a_noop_without_a_span():
     event_dict = add_trace_context(None, "info", {"event": "x"})
     assert "trace_id" not in event_dict
+
+
+# --- Regression tests: incoming X-Request-ID is validated --------------------
+
+
+def test_valid_request_id_is_echoed(client):
+    response = client.get("/health", headers={"X-Request-ID": "req-2026.07:abc_DEF"})
+    assert response.headers["x-request-id"] == "req-2026.07:abc_DEF"
+
+
+def test_missing_request_id_is_generated(client):
+    rid = client.get("/health").headers["x-request-id"]
+    assert len(rid) == 32 and all(c in "0123456789abcdef" for c in rid)
+
+
+def test_oversized_request_id_is_replaced(client):
+    rid = client.get("/health", headers={"X-Request-ID": "A" * 6000}).headers["x-request-id"]
+    assert len(rid) == 32 and "A" not in rid
+
+
+def test_request_id_with_injection_payload_is_replaced(client):
+    evil = 'evil value with spaces {"level":"error"}'
+    rid = client.get("/health", headers={"X-Request-ID": evil}).headers["x-request-id"]
+    assert rid != evil
+    assert len(rid) == 32
+
+
+def test_request_id_lands_on_the_server_span(client, span_exporter):
+    client.get("/api/orders/ORD-5?outcome=ok", headers={"X-Request-ID": "trace-me-123"})
+    server = next(s for s in span_exporter.get_finished_spans() if s.kind.name == "SERVER")
+    assert server.attributes.get("request.id") == "trace-me-123"

@@ -3,7 +3,7 @@
 ``create_app`` wires the three telemetry pillars onto a small real service:
 
 * structured JSON logging + a request-id middleware  (logs)
-* the Prometheus middleware and the ``/metrics`` mount (metrics)
+* the Prometheus middleware and the ``/metrics`` route (metrics)
 * OpenTelemetry auto-instrumentation + manual spans   (traces)
 
 The middleware are added before tracing is configured so the OpenTelemetry
@@ -23,7 +23,6 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
 from opentelemetry import context as otel_context
 from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
-from prometheus_client import make_asgi_app
 from pydantic import BaseModel, Field
 
 from app.config import get_settings
@@ -34,7 +33,7 @@ from app.services import (
     simulate_slow_endpoint,
 )
 from app.telemetry.logging import RequestIDMiddleware, configure_logging
-from app.telemetry.metrics import PrometheusMiddleware
+from app.telemetry.metrics import PrometheusMiddleware, install_metrics_route
 from app.telemetry.tracing import configure_tracing
 
 log = structlog.get_logger("app.main")
@@ -79,9 +78,13 @@ def create_app(
         )
         yield
         provider = getattr(app.state, "tracer_provider", None)
-        if provider is not None and hasattr(provider, "shutdown"):
-            # Flush any batched spans before the process exits.
-            provider.shutdown()
+        if provider is not None:
+            # Flush batched spans before the process exits. Only shut down a
+            # provider this app built; a shared one just gets flushed.
+            if getattr(app.state, "tracer_provider_owned", False):
+                provider.shutdown()
+            else:
+                provider.force_flush()
         log.info("service.shutdown")
 
     app = FastAPI(
@@ -96,7 +99,7 @@ def create_app(
     app.add_middleware(RequestIDMiddleware)
     if enable_metrics:
         app.add_middleware(PrometheusMiddleware)
-        app.mount("/metrics", make_asgi_app())
+        install_metrics_route(app)
 
     @app.get("/", tags=["meta"])
     async def root() -> dict:

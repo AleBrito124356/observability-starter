@@ -92,7 +92,12 @@ pip install -r requirements.txt
 
 # No collector running? Build spans without exporting them:
 OTEL_TRACES_EXPORTER=none uvicorn app.main:app --reload
+
+# ...or print every finished span to stdout instead:
+OTEL_TRACES_EXPORTER=console uvicorn app.main:app --reload
 ```
+
+`OTEL_TRACES_EXPORTER` accepts `otlp`, `console`, `none` or a comma-separated list, and `OTEL_EXPORTER_OTLP_PROTOCOL` selects `grpc` (port 4317) or `http/protobuf` (port 4318). Settings are validated at startup: `TRACE_SAMPLE_RATIO=1.5`, `FAILURE_RATE=7`, `SLOW_MIN_MS` above `SLOW_MAX_MS` or an unknown exporter name stop the service with a message that names the variable.
 
 ---
 
@@ -107,13 +112,23 @@ curl -s localhost:8000/api/orders/ORD-1001?outcome=ok | jq
 curl -si localhost:8000/api/orders/ORD-1002?outcome=fail | head -1
 # HTTP/1.1 503 Service Unavailable      <- becomes a 5xx on the error panel
 
-curl -s localhost:8000/metrics | grep -E '^http_request'
-# http_requests_total{method="GET",path="/api/orders/{order_id}",status_code="200"} 41.0
-# http_request_duration_seconds_bucket{le="0.1",method="GET",path="/api/orders/{order_id}",status_code="200"} 33.0
+curl -s localhost:8000/metrics | grep -E '^http_request.*order_id'
+# http_requests_total{method="GET",path="/api/orders/{order_id}",status_code="200"} 1.0
+# http_request_duration_seconds_bucket{le="0.1",method="GET",path="/api/orders/{order_id}",status_code="200"} 0.0
 # http_requests_in_progress{method="GET",path="/api/orders/{order_id}"} 0.0
+
+# Exemplars only travel in the OpenMetrics format:
+curl -s -H 'Accept: application/openmetrics-text; version=1.0.0' localhost:8000/metrics | grep -m1 'bucket.*trace_id'
+# http_request_duration_seconds_bucket{le="0.075",method="GET",path="/api/orders/{order_id}",status_code="200"} 1.0 # {trace_id="0af7651916cd43dd8448eb211c80319c"} 0.061 1790180476.51
 ```
 
-Note the `path` label is the **route template** `/api/orders/{order_id}`, not the raw URL — that keeps metric cardinality bounded no matter how many order ids you throw at it.
+`/metrics` is a plain route, so it answers `200` directly (no `307` redirect to `/metrics/`), and keeps `prometheus_client`'s content negotiation, gzip and `?name[]=` filtering.
+
+Every label value is bounded, so series count does not grow with traffic:
+
+- `path` is the **route template** `/api/orders/{order_id}`, never the raw URL; unknown paths collapse to `unmatched`.
+- `method` is one of the nine standard HTTP methods; anything else (`PROPFIND`, `X0000`, ...) is recorded as `_OTHER`, the OpenTelemetry semantic-convention value.
+- `status_code` is the numeric status.
 
 A log line looks like this (one JSON object per line, correlated to its trace):
 
@@ -156,15 +171,14 @@ pytest
 Everything reusable lives in `app/telemetry/`. It has no dependency on the demo endpoints — the only thing to rename is the business counter `ORDERS_PROCESSED` in `metrics.py`. Drop the folder into your project and wire it up:
 
 ```python
-from prometheus_client import make_asgi_app
 from app.telemetry.logging import RequestIDMiddleware, configure_logging
-from app.telemetry.metrics import PrometheusMiddleware
+from app.telemetry.metrics import PrometheusMiddleware, install_metrics_route
 from app.telemetry.tracing import configure_tracing
 
 configure_logging(settings)              # JSON logs + trace correlation
 app.add_middleware(RequestIDMiddleware)  # request id -> logs, span, response header
 app.add_middleware(PrometheusMiddleware) # RED metrics for every route
-app.mount("/metrics", make_asgi_app())   # Prometheus scrape endpoint
+install_metrics_route(app)               # GET /metrics, no redirect
 configure_tracing(app, settings)         # OTLP export + auto-instrumentation
 ```
 
@@ -172,7 +186,8 @@ The middleware are deliberately **pure ASGI**, not `BaseHTTPMiddleware`, so they
 
 ## An honest note on overhead and sampling
 
-- **Metrics** are essentially free — a few atomic increments and a histogram observation per request. The real cost is *cardinality*: keep label values bounded (route templates, not raw paths; status codes, not messages). This repo does that for you.
+- **Metrics** are essentially free — a few atomic increments and a histogram observation per request. The real cost is *cardinality*: keep label values bounded (route templates, not raw paths; a fixed set of methods; status codes, not messages). This repo does that for you, and the tests pin it down.
+- **Exemplars** are only attached when the request's trace is *sampled*. At `TRACE_SAMPLE_RATIO=0.1`, 90% of requests are not exported to Tempo, so an exemplar pointing at them would be a dead link; they simply carry none.
 - **Tracing** is not free. Span creation, attribute serialization and OTLP export cost CPU and bandwidth that scale with request volume. In development, `TRACE_SAMPLE_RATIO=1.0` keeps every trace. In production, lower it (`0.05`–`0.1` is common) — the `ParentBased` sampler here keeps a whole trace or drops it as a unit, so you never get half-recorded traces. Tail-based sampling in the collector is the next step when you want to always keep errors and slow requests.
 - **Logs** are the most expensive signal at scale. JSON structured logs are worth it for the queryability, but keep them at `INFO` in production and lean on traces for per-step detail rather than logging inside every function.
 - The middleware resolves the route template by matching against the app's routes on each request — an `O(routes)` cost that is negligible for typical apps but worth knowing about if you have thousands of routes.

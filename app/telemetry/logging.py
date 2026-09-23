@@ -8,6 +8,10 @@ Two ideas do the heavy lifting:
 * ``RequestIDMiddleware`` assigns each request an id, binds it to structlog's
   context vars so it appears on every log line for that request, echoes it back
   in the ``X-Request-ID`` response header, and records it on the active span.
+  A client-supplied id is honoured only when it is a short token
+  (``[A-Za-z0-9._:-]{1,128}``); anything else - a 6 KB string, spaces, quotes,
+  JSON - is replaced by a fresh id so it cannot bloat or forge log lines and
+  is never reflected back in a response header.
 
 Both structlog and the standard library (uvicorn's loggers) are routed through
 one ``ProcessorFormatter`` so all output is consistent JSON.
@@ -16,6 +20,7 @@ one ``ProcessorFormatter`` so all output is consistent JSON.
 from __future__ import annotations
 
 import logging
+import re
 import sys
 from uuid import uuid4
 
@@ -24,6 +29,24 @@ from opentelemetry import trace
 from starlette.datastructures import Headers, MutableHeaders
 
 DEFAULT_REQUEST_ID_HEADER = "X-Request-ID"
+
+#: What an acceptable incoming request id looks like: UUIDs (with or without
+#: dashes), ULIDs, W3C trace ids and most load-balancer ids all fit.
+REQUEST_ID_PATTERN = re.compile(r"[A-Za-z0-9._:-]{1,128}")
+
+
+def new_request_id() -> str:
+    """Generate a request id (32 lowercase hex characters)."""
+
+    return uuid4().hex
+
+
+def sanitize_request_id(candidate: str | None) -> str:
+    """Return ``candidate`` if it is a safe request id, otherwise a fresh one."""
+
+    if candidate and REQUEST_ID_PATTERN.fullmatch(candidate):
+        return candidate
+    return new_request_id()
 
 
 def add_trace_context(logger, method_name, event_dict):
@@ -108,7 +131,7 @@ class RequestIDMiddleware:
             return
 
         incoming = Headers(scope=scope)
-        request_id = incoming.get(self.header_name) or uuid4().hex
+        request_id = sanitize_request_id(incoming.get(self.header_name))
 
         structlog.contextvars.bind_contextvars(request_id=request_id)
 
