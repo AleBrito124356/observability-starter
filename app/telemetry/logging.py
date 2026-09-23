@@ -19,6 +19,12 @@ Two ideas do the heavy lifting:
 
 Both structlog and the standard library (uvicorn's loggers) are routed through
 one ``ProcessorFormatter`` so all output is consistent JSON.
+
+Optionally (``OTEL_LOGS_EXPORTER=otlp``) the same records are also shipped over
+OTLP by ``OTelLogHandler``: each structlog event becomes an OpenTelemetry log
+record whose body is the event name, whose attributes are the structured fields
+and whose trace/span ids come from the active span. The collector forwards them
+to Loki, which is what lets Grafana jump from a trace to its logs and back.
 """
 
 from __future__ import annotations
@@ -27,11 +33,19 @@ import logging
 import re
 import sys
 import time
+import traceback
 from uuid import uuid4
 
 import structlog
+from opentelemetry import context as otel_context
 from opentelemetry import trace
+from opentelemetry._logs import LogRecord, SeverityNumber
+from opentelemetry.sdk._logs import LoggerProvider
+from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
 from starlette.datastructures import Headers, MutableHeaders
+
+from app.config import parse_exporter_list
+from app.telemetry.resource import build_resource
 
 DEFAULT_REQUEST_ID_HEADER = "X-Request-ID"
 
@@ -131,6 +145,183 @@ def configure_logging(settings, *, stream=None) -> None:
         logger = logging.getLogger(name)
         logger.handlers = []
         logger.propagate = True
+
+
+# --- OTLP log export ------------------------------------------------------------
+
+#: structlog keys that are record fields in OpenTelemetry, not attributes.
+_RESERVED_EVENT_KEYS = frozenset(
+    {"event", "level", "timestamp", "trace_id", "span_id", "trace_flags", "exc_info", "stack"}
+)
+
+_SEVERITY = (
+    (logging.CRITICAL, SeverityNumber.FATAL, "FATAL"),
+    (logging.ERROR, SeverityNumber.ERROR, "ERROR"),
+    (logging.WARNING, SeverityNumber.WARN, "WARN"),
+    (logging.INFO, SeverityNumber.INFO, "INFO"),
+    (logging.DEBUG, SeverityNumber.DEBUG, "DEBUG"),
+)
+
+
+def _severity(levelno: int) -> tuple[SeverityNumber, str]:
+    for threshold, number, text in _SEVERITY:
+        if levelno >= threshold:
+            return number, text
+    return SeverityNumber.TRACE, "TRACE"
+
+
+def _attribute_value(value):
+    """Coerce a structlog value into an OpenTelemetry attribute value."""
+
+    if isinstance(value, (str, bool, int, float)):
+        return value
+    if isinstance(value, (list, tuple)) and value:
+        kinds = {type(item) for item in value}
+        if len(kinds) == 1 and kinds <= {str, bool, int, float}:
+            return list(value)  # homogeneous sequences are valid attributes
+    return str(value)
+
+
+def _body_and_attributes(record: logging.LogRecord) -> tuple[str, dict]:
+    """Translate a stdlib record (structlog-wrapped or not) to body + attributes."""
+
+    attributes: dict = {}
+    if isinstance(record.msg, dict):
+        # A structlog event, already run through the shared processor chain.
+        event = record.msg
+        body = str(event.get("event", ""))
+        for key, value in event.items():
+            if key in _RESERVED_EVENT_KEYS or key.startswith("_") or value is None:
+                continue
+            if key == "exception":
+                attributes["exception.stacktrace"] = str(value)
+                continue
+            attributes[key] = _attribute_value(value)
+    else:
+        # A plain stdlib record (uvicorn, httpx, ...): add the bound context.
+        body = record.getMessage()
+        for key, value in structlog.contextvars.get_contextvars().items():
+            if value is not None:
+                attributes[key] = _attribute_value(value)
+    if record.exc_info and record.exc_info[0] is not None:
+        exc_type, exc_value, exc_tb = record.exc_info
+        attributes["exception.type"] = exc_type.__name__
+        attributes["exception.message"] = str(exc_value)
+        attributes.setdefault(
+            "exception.stacktrace",
+            "".join(traceback.format_exception(exc_type, exc_value, exc_tb)),
+        )
+    return body, attributes
+
+
+class OTelLogHandler(logging.Handler):
+    """A stdlib handler that forwards records to an OpenTelemetry ``LoggerProvider``.
+
+    It runs synchronously in the thread/task that logged, so the active span is
+    the one the log call happened in: the exported record carries the same
+    ``trace_id``/``span_id`` as the JSON line on stdout. Records from the
+    OpenTelemetry SDK itself are skipped, so a failing exporter cannot feed its
+    own error logs back into the pipeline.
+    """
+
+    def __init__(self, logger_provider, level: int = logging.NOTSET) -> None:
+        super().__init__(level=level)
+        self.logger_provider = logger_provider
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.name == "opentelemetry" or record.name.startswith("opentelemetry."):
+            return False
+        return super().filter(record)
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            body, attributes = _body_and_attributes(record)
+            severity_number, severity_text = _severity(record.levelno)
+            self.logger_provider.get_logger(record.name).emit(
+                LogRecord(
+                    timestamp=int(record.created * 1e9),
+                    context=otel_context.get_current(),
+                    severity_number=severity_number,
+                    severity_text=severity_text,
+                    body=body,
+                    attributes=attributes,
+                )
+            )
+        except Exception:  # noqa: BLE001 - a log handler must never raise
+            self.handleError(record)
+
+
+def build_log_exporters(settings) -> list:
+    """Build every exporter named in ``OTEL_LOGS_EXPORTER`` (lazy imports)."""
+
+    exporters = []
+    names = parse_exporter_list(
+        getattr(settings, "otel_logs_exporter", "none"), variable="OTEL_LOGS_EXPORTER"
+    )
+    for name in names:
+        if name == "console":
+            from opentelemetry.sdk._logs import export as log_export
+
+            # ConsoleLogRecordExporter is the newer name of ConsoleLogExporter.
+            console = (
+                getattr(log_export, "ConsoleLogRecordExporter", None)
+                or log_export.ConsoleLogExporter
+            )
+            exporters.append(console())
+        elif name == "otlp":
+            exporters.append(_build_otlp_log_exporter(settings))
+    return exporters
+
+
+def _build_otlp_log_exporter(settings):
+    protocol = getattr(settings, "otel_exporter_otlp_protocol", "grpc")
+    endpoint = getattr(settings, "otlp_endpoint", None) or settings.otel_exporter_otlp_endpoint
+    if protocol == "http/protobuf":
+        from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
+
+        return OTLPLogExporter(endpoint=f"{endpoint.rstrip('/')}/v1/logs")
+    from opentelemetry.exporter.otlp.proto.grpc._log_exporter import OTLPLogExporter
+
+    return OTLPLogExporter(endpoint=endpoint, insecure=settings.otel_exporter_otlp_insecure)
+
+
+def configure_log_export(settings, *, log_processors=None) -> LoggerProvider | None:
+    """Ship log records over OTLP (or to the console) in addition to stdout.
+
+    Returns the ``LoggerProvider``, or ``None`` when ``OTEL_LOGS_EXPORTER`` is
+    ``none`` and no processors were injected. Injected ``log_processors``
+    replace the configured exporters (tests pass an in-memory exporter). The
+    handler is attached to the root logger; calling this again replaces it.
+    """
+
+    if log_processors:
+        processors = list(log_processors)
+    else:
+        processors = [BatchLogRecordProcessor(e) for e in build_log_exporters(settings)]
+    if not processors:
+        return None
+
+    provider = LoggerProvider(resource=build_resource(settings))
+    for processor in processors:
+        provider.add_log_record_processor(processor)
+
+    root = logging.getLogger()
+    for existing in [h for h in root.handlers if isinstance(h, OTelLogHandler)]:
+        root.removeHandler(existing)
+    root.addHandler(OTelLogHandler(provider))
+    return provider
+
+
+def remove_log_export(provider) -> None:
+    """Detach the ``OTelLogHandler`` bound to ``provider`` from the root logger."""
+
+    root = logging.getLogger()
+    for handler in [h for h in root.handlers if isinstance(h, OTelLogHandler)]:
+        if handler.logger_provider is provider:
+            root.removeHandler(handler)
+
+
+# --- Request id + access log ----------------------------------------------------
 
 
 class RequestIDMiddleware:

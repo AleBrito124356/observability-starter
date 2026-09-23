@@ -1,0 +1,44 @@
+# Single-binary Loki 3.x with local filesystem storage. Fine for a laptop
+# stack; not a production topology.
+#
+# Logs arrive from the collector on Loki's native OTLP endpoint (/otlp), so:
+#   - the resource attribute service.name becomes the stream label service_name
+#   - the log record's trace_id / span_id / severity_text and every attribute
+#     (order_id, request_id, route, ...) become structured metadata, queryable
+#     as {service_name="observability-starter"} | trace_id="<id>"
+# Structured metadata needs the tsdb store with schema v13, as configured below.
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+  grpc_listen_port: 9096
+  log_level: warn
+
+common:
+  instance_addr: 127.0.0.1
+  path_prefix: /loki
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+
+schema_config:
+  configs:
+    - from: "2024-04-01"
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+limits_config:
+  allow_structured_metadata: true
+  volume_enabled: true
+
+analytics:
+  reporting_enabled: false

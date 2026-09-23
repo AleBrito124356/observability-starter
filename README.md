@@ -38,22 +38,37 @@ You start at metrics (a dashboard alerts you), pivot to a trace (the latency pan
 ```mermaid
 flowchart LR
     load[Load generator] -->|HTTP| app[FastAPI app]
-    app -->|OTLP gRPC spans| col[OTel Collector]
-    col -->|OTLP| tempo[Tempo traces]
-    prom[Prometheus] -->|scrape /metrics| app
+    app -->|OTLP spans + logs| col[OTel Collector]
+    col -->|OTLP gRPC| tempo[Tempo]
+    col -->|OTLP/HTTP| loki[Loki]
+    tempo -->|remote write: service graph + span metrics| prom[Prometheus]
+    prom -->|scrape /metrics| app
     prom -->|scrape self-metrics| col
-    app -->|JSON logs to stdout| stdout[Container logs]
+    app -->|JSON logs| stdout[stdout]
     graf[Grafana] -->|PromQL| prom
     graf -->|TraceQL| tempo
+    graf -->|LogQL| loki
 ```
 
-Metrics use a **pull** model — Prometheus scrapes `/metrics` on the app. Traces use a **push** model — the app ships spans over OTLP to the collector, which batches and forwards them to Tempo. Logs go to stdout as JSON, where your platform's log agent picks them up. Grafana reads Prometheus and Tempo and links between them.
+Metrics use a **pull** model — Prometheus scrapes `/metrics` on the app. Traces and logs use a **push** model — the app ships spans and log records over OTLP to the collector, which batches them and forwards spans to Tempo and logs to Loki's native OTLP endpoint. Logs are *also* written to stdout as one JSON object per line, so `docker compose logs` and any platform log agent keep working. Tempo's metrics generator turns the traces into service-graph and span metrics and remote-writes them to Prometheus, which is what fills the service graph.
+
+Every hop of the pivot is a provisioned link, so it is one click each way:
 
 ```mermaid
 flowchart LR
-    spike[Latency spike on a metrics panel] -->|exemplar trace_id| span[The exact slow trace in Tempo]
-    span -->|same trace_id| line[The JSON log lines for that request]
+    spike[Latency spike on a metrics panel] -->|exemplar trace_id| span[The exact trace in Tempo]
+    span -->|Logs for this span: trace_id filter| line[Its log lines in Loki]
+    line -->|derived field trace_id| span
 ```
+
+| Hop | Wired by |
+| --- | --- |
+| metrics → trace | the latency histogram's `trace_id` exemplar (sampled traces only) + Prometheus `exemplarTraceIdDestinations` → Tempo |
+| trace → logs | Tempo `tracesToLogsV2` → Loki query `{service_name="observability-starter"} \| trace_id="<id>"` |
+| logs → trace | Loki `derivedFields` on the `trace_id` structured-metadata field → Tempo |
+| trace → service graph | Tempo `serviceMap` → Prometheus, fed by Tempo's metrics generator |
+
+> **What was verified, and how.** The app side is covered by tests that run offline: spans and log records are exported over real OTLP (both gRPC and HTTP/protobuf) to a fake collector that decodes them with the official protobuf messages, and the test asserts that the log records carry the same `trace_id`/`span_id` as the spans. The stack files (compose, collector, Loki, Tempo, Prometheus, Grafana provisioning and dashboard) are checked by contract tests for internal consistency. `docker compose up` itself was **not** run while writing this version (no Docker on the machine it was built on); see [Checking the Grafana links](#checking-the-grafana-links) for the manual steps.
 
 ---
 
@@ -113,6 +128,17 @@ OTEL_TRACES_EXPORTER=console uvicorn app.main:app --reload
 ```
 
 `OTEL_TRACES_EXPORTER` accepts `otlp`, `console`, `none` or a comma-separated list, and `OTEL_EXPORTER_OTLP_PROTOCOL` selects `grpc` (port 4317) or `http/protobuf` (port 4318). Settings are validated at startup: `TRACE_SAMPLE_RATIO=1.5`, `FAILURE_RATE=7`, `SLOW_MIN_MS` above `SLOW_MAX_MS` or an unknown exporter name stop the service with a message that names the variable.
+
+
+### Checking the Grafana links
+
+With the stack up and the load generator running (`python load/generate.py --duration 120`), each hop can be checked by hand:
+
+1. **metrics → trace** — open the dashboard, find the purple exemplar dots on *Latency p50 / p95 / p99* (toggle *Exemplars* in the panel's query options if they are hidden), click one and choose **View trace**: Tempo opens that exact trace.
+2. **trace → logs** — in the trace view, open a span and click **Logs for this span**: Explore opens Loki with `{service_name="observability-starter"} | trace_id="<that id>"` and shows the request's `order.processed` / `order.failed` / `request.completed` lines.
+3. **logs → trace** — in the *Logs for this service* panel, expand any line: its `trace_id` field carries a **View trace** link back to Tempo.
+4. **service graph** — Explore → Tempo → *Service Graph* (or the *Service graph* panel). After a minute of traffic it shows the service, its self-call edge (from `/api/external`) and a virtual database node for `db.query`; in Prometheus, `traces_service_graph_request_total` returns series.
+5. **Loki directly** — `curl -sG localhost:3100/loki/api/v1/query_range --data-urlencode 'query={service_name="observability-starter"} | trace_id!=""' | head -c 600`.
 
 ---
 

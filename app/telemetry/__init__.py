@@ -10,7 +10,8 @@ Copy this folder into your own FastAPI service and wire it up with::
 ``setup_telemetry`` applies the pieces in the order that makes correlation
 work - it is the one place that encodes that rule:
 
-1. ``configure_logging``      JSON logs with ``trace_id``/``span_id`` on every line.
+1. ``configure_logging``      JSON logs with ``trace_id``/``span_id`` on every line,
+   plus ``configure_log_export`` when ``OTEL_LOGS_EXPORTER`` asks for OTLP.
 2. ``RequestIDMiddleware``    a request id on logs, the span and the response.
 3. ``PrometheusMiddleware``   RED metrics with bounded labels and trace exemplars,
    plus ``GET /metrics``.
@@ -28,7 +29,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from app.telemetry.logging import RequestIDMiddleware, configure_logging
+from app.telemetry.logging import (
+    RequestIDMiddleware,
+    configure_log_export,
+    configure_logging,
+    remove_log_export,
+)
 from app.telemetry.metrics import (
     DEFAULT_METRICS_PATH,
     PrometheusMiddleware,
@@ -45,12 +51,15 @@ class Telemetry:
 
     tracer_provider: Any = None
     tracer_provider_owned: bool = False
+    logger_provider: Any = None
 
     def force_flush(self, timeout_millis: int = 5000) -> None:
-        """Push any buffered spans to their exporters now."""
+        """Push any buffered spans and log records to their exporters now."""
 
         if self.tracer_provider is not None:
             self.tracer_provider.force_flush(timeout_millis)
+        if self.logger_provider is not None:
+            self.logger_provider.force_flush(timeout_millis)
 
     def shutdown(self) -> None:
         """Flush everything; shut down only the providers this app created.
@@ -65,6 +74,11 @@ class Telemetry:
                 self.tracer_provider.shutdown()
             else:
                 self.tracer_provider.force_flush()
+        if self.logger_provider is not None:
+            # Always created by setup_telemetry, so always ours to close.
+            remove_log_export(self.logger_provider)
+            self.logger_provider.shutdown()
+            self.logger_provider = None
 
 
 def setup_telemetry(
@@ -76,6 +90,7 @@ def setup_telemetry(
     tracing: bool = True,
     metrics_path: str = DEFAULT_METRICS_PATH,
     span_processors=None,
+    log_processors=None,
     log_stream=None,
 ) -> Telemetry:
     """Wire logs, metrics and traces onto ``app`` in the correct order.
@@ -91,6 +106,10 @@ def setup_telemetry(
         span_processors: extra span processors (tests inject an in-memory
             exporter here). When given for a new provider, they replace the
             exporters named in ``OTEL_TRACES_EXPORTER``.
+        log_processors: log record processors for OTLP-style export; when
+            given they replace the exporters named in ``OTEL_LOGS_EXPORTER``.
+            Export happens even with ``logging=False`` (the handler goes on the
+            root logger), but then the host decides the root log level.
         log_stream: where JSON log lines go (default ``sys.stdout``).
 
     Returns:
@@ -99,13 +118,14 @@ def setup_telemetry(
 
     if logging:
         configure_logging(settings, stream=log_stream)
+    logger_provider = configure_log_export(settings, log_processors=log_processors)
 
     app.add_middleware(RequestIDMiddleware, access_log=getattr(settings, "log_requests", True))
     if metrics:
         app.add_middleware(PrometheusMiddleware, excluded_paths=(metrics_path,))
         install_metrics_route(app, metrics_path)
 
-    telemetry = Telemetry()
+    telemetry = Telemetry(logger_provider=logger_provider)
     if tracing:
         telemetry.tracer_provider = configure_tracing(
             app, settings, span_processors=span_processors

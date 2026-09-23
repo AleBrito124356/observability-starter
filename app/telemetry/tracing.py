@@ -22,7 +22,6 @@ import logging
 from opentelemetry import trace
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
-from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import (
     BatchSpanProcessor,
@@ -33,20 +32,16 @@ from opentelemetry.sdk.trace.export import (
 from opentelemetry.sdk.trace.sampling import ParentBased, TraceIdRatioBased
 
 from app.config import parse_exporter_list
+from app.telemetry.resource import build_resource
+
+__all__ = [
+    "build_otlp_span_exporter",
+    "build_resource",
+    "build_span_exporters",
+    "configure_tracing",
+]
 
 _logger = logging.getLogger(__name__)
-
-
-def build_resource(settings) -> Resource:
-    """Build the OpenTelemetry Resource that tags every span with service identity."""
-
-    return Resource.create(
-        {
-            "service.name": settings.service_name,
-            "service.version": settings.service_version,
-            "deployment.environment": settings.environment,
-        }
-    )
 
 
 def _otlp_endpoint(settings) -> str:

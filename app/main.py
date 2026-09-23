@@ -59,6 +59,7 @@ def create_app(
     enable_metrics: bool = True,
     enable_logging: bool = True,
     span_processors=None,
+    log_processors=None,
     http_client: httpx.AsyncClient | None = None,
 ) -> FastAPI:
     """Build and return the FastAPI application.
@@ -69,6 +70,8 @@ def create_app(
             e.g. so tests keep control of the global logging configuration.
         span_processors: extra span processors (tests and the demo inject an
             in-memory exporter here).
+        log_processors: log record processors that replace the exporters named
+            in OTEL_LOGS_EXPORTER (tests inject an in-memory exporter here).
         http_client: the client ``/api/external`` uses for upstream calls.
             By default one ``httpx.AsyncClient`` is created in the lifespan and
             shared by every request (connection pooling instead of a new client
@@ -204,6 +207,7 @@ def create_app(
         metrics=enable_metrics,
         tracing=enable_tracing,
         span_processors=span_processors,
+        log_processors=log_processors,
     )
     return app
 

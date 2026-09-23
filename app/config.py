@@ -21,9 +21,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app import __version__
 
-#: Exporter names understood by ``OTEL_TRACES_EXPORTER``. These are the values
-#: from the OpenTelemetry SDK environment-variable spec that this service
-#: implements.
+#: Exporter names understood by ``OTEL_TRACES_EXPORTER`` and
+#: ``OTEL_LOGS_EXPORTER``. These are the values from the OpenTelemetry SDK
+#: environment-variable spec that this service implements.
 SUPPORTED_EXPORTERS = ("otlp", "console", "none")
 
 #: Default collector endpoints per OTLP protocol (the spec's defaults).
@@ -85,6 +85,10 @@ class Settings(BaseSettings):
     # Comma-separated list of: otlp, console, none. "none" builds spans locally
     # without shipping them anywhere (tests, offline runs).
     otel_traces_exporter: str = "otlp"
+    # Same values for logs. Off by default: logs always go to stdout as JSON;
+    # shipping them over OTLP too is opt-in (the docker-compose stack turns it
+    # on so they reach Loki with their trace ids).
+    otel_logs_exporter: str = "none"
     # Head-based sampling ratio. 1.0 keeps every trace; lower it in production.
     trace_sample_ratio: float = Field(default=1.0, ge=0.0, le=1.0)
 
@@ -97,7 +101,9 @@ class Settings(BaseSettings):
 
     # --- Demo behaviour knobs ---
     # URL the /api/external endpoint calls to exercise httpx instrumentation.
-    upstream_url: str = "http://localhost:8000/health"
+    # The default is the service's own traced root endpoint, so the trace shows
+    # a CLIENT span and a propagated SERVER span without any external service.
+    upstream_url: str = "http://localhost:8000/"
     # Simulated dependency latency window, in milliseconds.
     slow_min_ms: int = Field(default=20, ge=0)
     slow_max_ms: int = Field(default=400, ge=0)
@@ -118,6 +124,12 @@ class Settings(BaseSettings):
     @classmethod
     def _check_traces_exporter(cls, value: str) -> str:
         parse_exporter_list(value, variable="OTEL_TRACES_EXPORTER")
+        return value.strip().lower()
+
+    @field_validator("otel_logs_exporter")
+    @classmethod
+    def _check_logs_exporter(cls, value: str) -> str:
+        parse_exporter_list(value, variable="OTEL_LOGS_EXPORTER")
         return value.strip().lower()
 
     @field_validator("otel_exporter_otlp_endpoint")
@@ -147,6 +159,12 @@ class Settings(BaseSettings):
         """The parsed ``OTEL_TRACES_EXPORTER`` list (empty tuple for ``none``)."""
 
         return parse_exporter_list(self.otel_traces_exporter, variable="OTEL_TRACES_EXPORTER")
+
+    @property
+    def logs_exporters(self) -> tuple[str, ...]:
+        """The parsed ``OTEL_LOGS_EXPORTER`` list (empty tuple for ``none``)."""
+
+        return parse_exporter_list(self.otel_logs_exporter, variable="OTEL_LOGS_EXPORTER")
 
     @property
     def otlp_endpoint(self) -> str:
