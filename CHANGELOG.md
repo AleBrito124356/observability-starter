@@ -8,11 +8,11 @@
 - **Logs pillar in the stack** — OTLP log export (`OTEL_LOGS_EXPORTER=otlp|console|none`, default `none`) through a stdlib/structlog → OpenTelemetry bridge that keeps `trace_id`/`span_id`; Loki 3.2 in docker-compose behind a collector logs pipeline; Grafana trace → logs (`tracesToLogsV2`) and logs → trace (`derivedFields`) links; "Logs for this service", WARN+ log rate and service graph panels.
 - **Service graph** — Tempo's metrics generator (service-graphs, span-metrics) remote-writes to Prometheus, started with `--web.enable-remote-write-receiver`.
 - `OTEL_EXPORTER_OTLP_PROTOCOL=grpc|http/protobuf` for traces and logs; the endpoint defaults to 4317 or 4318 accordingly.
-- `app.telemetry.setup_telemetry(app, settings, ...)`: one call that wires logging, request id, metrics and tracing in the order correlation needs, returning a `Telemetry` handle with `force_flush()` / `shutdown()`.
+- `app.telemetry.setup_telemetry(app, settings, ...)`: one call that wires logging, request id, metrics and tracing in the order correlation needs, returning a `Telemetry` handle with `force_flush()` / `shutdown()`. The package now uses only relative imports and nothing else from `app`, so it can be copied under any name.
 - A structured `request.completed` access-log line per request (method, path, route template, status, duration, trace id), controlled by `LOG_REQUESTS` (default `true`).
 - Packaging: `pip install -e ".[dev]"` works (build system, dependencies, `dev` extra) and installs the `observability-starter` CLI with `serve`, `demo` and `load` subcommands.
 - Settings validation with messages that name the variable (`TRACE_SAMPLE_RATIO` and `FAILURE_RATE` in `[0, 1]`, `SLOW_MIN_MS <= SLOW_MAX_MS`, real log levels, known exporter names, http(s) endpoints).
-- 136 new tests (148 in total, all offline), including OTLP end-to-end tests against fake gRPC and HTTP collectors and contract tests over `deploy/`.
+- 137 new tests (149 in total, all offline), including OTLP end-to-end tests against fake gRPC and HTTP collectors and contract tests over `deploy/`.
 
 ### Fixed
 
@@ -34,7 +34,7 @@
 - `UPSTREAM_URL` defaults to `http://localhost:8000/` (the traced root endpoint) instead of `/health`, so the self-call shows a propagated SERVER span and a service-graph edge. `observability-starter serve` points it at its own port unless you set it.
 - While `LOG_REQUESTS=true`, uvicorn's plain-text access log is silenced (the app's structured line replaces it); set `LOG_REQUESTS=false` to get uvicorn's lines, as JSON.
 - The per-message ASGI `http send` / `http receive` spans are no longer created (two or three uninformative spans per request).
-- `opentelemetry-instrumentation-logging` is no longer used: since 0.65 it injected nothing without extra flags and installed a second root handler bound to the global `LoggerProvider`; trace ids already reach stdlib records through the structlog chain.
+- `opentelemetry-instrumentation-logging` is no longer used: in the current release (0.65b0) it injects nothing without extra flags and installs a second root handler bound to the global `LoggerProvider`; trace ids already reach stdlib records through the structlog chain.
 - Minimum versions: `opentelemetry-*` 1.35.0 and instrumentation 0.56b0 (the first SDK whose `LogRecord` takes a `context`). The suite is tested on 1.35.0/0.56b0 and 1.44.0/0.65b0.
 - New dependency: `opentelemetry-exporter-otlp-proto-http`. New dev dependencies: `pyyaml`, `ruff`.
 

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-import re
+import ast
+import os
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -61,14 +62,58 @@ def test_setup_telemetry_can_skip_pillars():
     assert TestClient(bare).get("/metrics").status_code == 404
 
 
-def test_telemetry_package_does_not_import_the_demo_service():
-    pattern = re.compile(
-        r"^\s*(from|import)\s+app\.(services|main|business_metrics|demo)\b", re.MULTILINE
-    )
-    offenders = [
-        path.name for path in TELEMETRY_DIR.glob("*.py") if pattern.search(path.read_text("utf-8"))
-    ]
+def test_telemetry_package_is_self_contained():
+    # No absolute `app...` imports at all (only relative ones inside the
+    # package), so the folder works when copied anywhere under any name.
+    offenders = []
+    for path in TELEMETRY_DIR.glob("*.py"):
+        for node in ast.walk(ast.parse(path.read_text("utf-8"))):
+            if isinstance(node, ast.ImportFrom) and node.level == 0:
+                names = [node.module or ""]
+            elif isinstance(node, ast.Import):
+                names = [alias.name for alias in node.names]
+            else:
+                continue
+            offenders += [(path.name, n) for n in names if n == "app" or n.startswith("app.")]
     assert offenders == []
+
+
+def test_telemetry_package_works_when_copied_under_another_name(tmp_path):
+    import shutil
+    import subprocess
+    import sys
+
+    shutil.copytree(TELEMETRY_DIR, tmp_path / "mytelemetry")
+    code = (
+        "from types import SimpleNamespace\n"
+        "from fastapi import FastAPI\n"
+        "from fastapi.testclient import TestClient\n"
+        "from mytelemetry import setup_telemetry\n"
+        "settings = SimpleNamespace(service_name='copied', service_version='1', environment='t',"
+        " otel_traces_exporter='none', otel_logs_exporter='none', trace_sample_ratio=1.0,"
+        " log_level='INFO', log_json=True, log_requests=True)\n"
+        "app = FastAPI()\n"
+        "@app.get('/ping')\n"
+        "async def ping():\n"
+        "    return {'ok': True}\n"
+        "setup_telemetry(app, settings)\n"
+        "client = TestClient(app)\n"
+        "assert client.get('/ping').status_code == 200\n"
+        "assert 'http_requests_total' in client.get('/metrics').text\n"
+        "print('copied-ok')\n"
+    )
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=tmp_path,  # the repo's `app` package is not importable from here
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr[-2000:]
+    assert "copied-ok" in result.stdout
 
 
 def test_importing_app_main_has_no_side_effects():

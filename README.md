@@ -260,12 +260,12 @@ Click a purple exemplar dot on the latency panel to jump straight to that trace 
 
 ## Copy the telemetry into your own app
 
-Everything reusable lives in `app/telemetry/`. It imports nothing from the demo service (a test enforces that), and the demo's business counter lives outside it in `app/business_metrics.py`. Drop the folder into your project and wire it up with one call:
+Everything reusable lives in `app/telemetry/`. It uses only relative imports and nothing else from `app` — the demo's business counter lives outside it in `app/business_metrics.py` — so the folder works when copied into any project under any name (a test copies it to a temporary `mytelemetry/` package and serves a bare FastAPI app with it). Wire it up with one call:
 
 ```python
 from fastapi import FastAPI
 from app.config import Settings          # or any object with the same fields
-from app.telemetry import setup_telemetry
+from app.telemetry import setup_telemetry   # e.g. `from mytelemetry import ...` once copied
 
 app = FastAPI()
 # ... your routes ...
@@ -294,7 +294,7 @@ The default here optimizes for *seeing everything while you learn*. Turn the kno
 
 ```bash
 pip install -e ".[dev]"
-pytest          # 148 tests, all offline, ~30 s
+pytest          # 149 tests, all offline, ~15-40 s
 ruff check app tests load
 ```
 
@@ -327,6 +327,7 @@ observability-starter/
 │       ├── tracing.py          #    tracer provider, sampler, exporters, auto-instrumentation
 │       ├── metrics.py          #    RED metrics, ASGI middleware, the /metrics route
 │       ├── logging.py          #    structlog JSON, request id + access log, OTLP log bridge
+│       ├── exporters.py        #    OTEL_*_EXPORTER parsing
 │       └── resource.py         #    service identity shared by spans and logs
 ├── deploy/
 │   ├── docker-compose.yml      # app + collector + prometheus + tempo + loki + grafana
@@ -337,7 +338,7 @@ observability-starter/
 │   ├── loki.yaml               # single-binary Loki with OTLP structured metadata
 │   └── grafana/provisioning/   # linked datasources + dashboard, provisioned on boot
 ├── load/generate.py            # asyncio + httpx load generator (the shared request mix)
-├── tests/                      # 148 offline tests, including stack contract tests
+├── tests/                      # 149 offline tests, including stack contract tests
 ├── pyproject.toml              # package, `dev` extra, console script
 ├── requirements.txt            # runtime deps for the Dockerfile (kept in sync by a test)
 └── requirements-dev.txt

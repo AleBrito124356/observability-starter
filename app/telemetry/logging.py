@@ -44,8 +44,8 @@ from opentelemetry.sdk._logs import LoggerProvider
 from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
 from starlette.datastructures import Headers, MutableHeaders
 
-from app.config import parse_exporter_list
-from app.telemetry.resource import build_resource
+from .exporters import parse_exporter_list
+from .resource import build_resource
 
 try:
     # Older SDKs: Logger.emit() needs the SDK LogRecord, which carries the

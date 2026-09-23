@@ -20,8 +20,9 @@ work - it is the one place that encodes that rule:
    above; that is what lets them read the active trace id.
 
 ``settings`` can be any object with the attributes of ``app.config.Settings``.
-Nothing in this package imports the demo service (``app.main``,
-``app.services``, ``app.business_metrics``), so it can be copied as-is.
+The package only uses relative imports and never imports the rest of ``app``
+(a test enforces both), so the folder can be copied as-is into any project,
+under any name.
 """
 
 from __future__ import annotations
@@ -29,18 +30,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from app.telemetry.logging import (
+from .logging import (
     RequestIDMiddleware,
     configure_log_export,
     configure_logging,
     remove_log_export,
 )
-from app.telemetry.metrics import (
+from .metrics import (
     DEFAULT_METRICS_PATH,
     PrometheusMiddleware,
     install_metrics_route,
 )
-from app.telemetry.tracing import configure_tracing
+from .tracing import configure_tracing
 
 __all__ = ["Telemetry", "setup_telemetry"]
 

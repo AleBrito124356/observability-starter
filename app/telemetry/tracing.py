@@ -31,8 +31,8 @@ from opentelemetry.sdk.trace.export import (
 )
 from opentelemetry.sdk.trace.sampling import ParentBased, TraceIdRatioBased
 
-from app.config import parse_exporter_list
-from app.telemetry.resource import build_resource
+from .exporters import parse_exporter_list
+from .resource import build_resource
 
 __all__ = [
     "build_otlp_span_exporter",
