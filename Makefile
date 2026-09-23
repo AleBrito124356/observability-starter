@@ -1,19 +1,25 @@
 # Convenience targets. On Windows, run the underlying commands directly if you
 # do not have make available.
 
-.PHONY: install dev run test up down load logs clean
+.PHONY: install dev run demo test lint up down load logs clean
 
 install:
-	pip install -r requirements.txt
+	pip install -e .
 
 dev:
-	pip install -r requirements-dev.txt
+	pip install -e ".[dev]"
 
 run:
-	uvicorn app.main:app --reload --port 8000
+	observability-starter serve --reload --port 8000
+
+demo:
+	observability-starter demo --requests 200 --seed 7
 
 test:
 	pytest
+
+lint:
+	ruff check app tests load
 
 up:
 	docker compose -f deploy/docker-compose.yml up --build -d
@@ -22,11 +28,11 @@ down:
 	docker compose -f deploy/docker-compose.yml down -v
 
 load:
-	python load/generate.py --duration 120 --concurrency 20
+	observability-starter load --duration 120 --concurrency 20
 
 logs:
 	docker compose -f deploy/docker-compose.yml logs -f app
 
 clean:
 	find . -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
-	rm -rf .pytest_cache
+	rm -rf .pytest_cache .ruff_cache build *.egg-info

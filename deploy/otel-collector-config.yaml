@@ -1,7 +1,10 @@
 # OpenTelemetry Collector (contrib) configuration.
-# Receives OTLP traces from the app and forwards them to Tempo. Prometheus
-# scrapes the app and the collector directly, so no metrics pipeline is needed
-# here - this keeps the collector focused on being the trace ingestion buffer.
+# Receives OTLP traces and logs from the app (gRPC on 4317 or HTTP on 4318):
+#   - traces are forwarded to Tempo over OTLP gRPC;
+#   - logs are forwarded to Loki's native OTLP endpoint over OTLP/HTTP, keeping
+#     their trace_id/span_id so Grafana can link traces and logs both ways.
+# Prometheus scrapes the app and the collector directly, so no metrics pipeline
+# is needed here.
 
 receivers:
   otlp:
@@ -25,6 +28,9 @@ exporters:
     endpoint: tempo:4317
     tls:
       insecure: true
+  otlphttp/loki:
+    # The exporter appends /v1/logs, giving Loki's http://loki:3100/otlp/v1/logs.
+    endpoint: http://loki:3100/otlp
   debug:
     verbosity: basic
 
@@ -39,6 +45,10 @@ service:
       receivers: [otlp]
       processors: [memory_limiter, batch]
       exporters: [otlp/tempo, debug]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlphttp/loki]
   telemetry:
     metrics:
       address: 0.0.0.0:8888

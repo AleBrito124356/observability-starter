@@ -1,11 +1,63 @@
+[build-system]
+# 77+ understands the SPDX `license` string below (PEP 639).
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "observability-starter"
-version = "0.1.0"
-description = "The three pillars of observability wired into a FastAPI service."
+version = "0.2.0"
+description = "The three pillars of observability wired into a FastAPI service: OpenTelemetry traces and logs, Prometheus metrics, and a Grafana/Tempo/Loki stack."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "Alejandro Brito" }]
+keywords = ["observability", "opentelemetry", "prometheus", "fastapi", "grafana", "tempo", "loki"]
+classifiers = [
+    "Framework :: FastAPI",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: System :: Monitoring",
+]
+# Keep in sync with requirements.txt (the Dockerfile installs from that file);
+# tests/test_packaging.py fails if the two drift apart.
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "httpx>=0.27.0",
+    "pydantic>=2.7.0",
+    "pydantic-settings>=2.3.0",
+    "structlog>=24.1.0",
+    "prometheus-client>=0.20.0",
+    "opentelemetry-api>=1.35.0",
+    "opentelemetry-sdk>=1.35.0",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.35.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.35.0",
+    "opentelemetry-instrumentation-fastapi>=0.56b0",
+    "opentelemetry-instrumentation-httpx>=0.56b0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pyyaml>=6.0",
+    "ruff>=0.6.0",
+]
+
+[project.scripts]
+observability-starter = "app.cli:main"
+
+[project.urls]
+Repository = "https://github.com/AleBrito124356/observability-starter"
+
+[tool.setuptools]
+# Explicit list: the repo also has deploy/ and tests/, which are not packages
+# to install.
+packages = ["app", "app.telemetry", "app.demo", "load"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
@@ -15,3 +67,9 @@ addopts = "-q"
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "RUF", "BLE"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app", "load", "tests"]

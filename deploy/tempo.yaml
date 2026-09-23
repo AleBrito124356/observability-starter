@@ -1,5 +1,10 @@
 # Single-binary Tempo, local filesystem storage. Fine for a laptop stack;
 # not a production topology. Traces arrive over OTLP from the collector.
+#
+# The metrics generator derives service-graph and span metrics from the traces
+# and remote-writes them to Prometheus (started with
+# --web.enable-remote-write-receiver). That is what fills Grafana's Service
+# Graph / node graph for the Tempo datasource (serviceMap -> prometheus).
 stream_over_http_enabled: true
 
 server:
@@ -22,6 +27,16 @@ compactor:
   compaction:
     block_retention: 1h
 
+metrics_generator:
+  registry:
+    external_labels:
+      source: tempo
+  storage:
+    path: /var/tempo/generator/wal
+    remote_write:
+      - url: http://prometheus:9090/api/v1/write
+        send_exemplars: true
+
 storage:
   trace:
     backend: local
@@ -29,6 +44,13 @@ storage:
       path: /var/tempo/wal
     local:
       path: /var/tempo/blocks
+
+overrides:
+  defaults:
+    metrics_generator:
+      # service-graphs -> traces_service_graph_request_total & co.
+      # span-metrics   -> traces_spanmetrics_calls_total, traces_spanmetrics_latency_*
+      processors: [service-graphs, span-metrics]
 
 usage_report:
   reporting_enabled: false

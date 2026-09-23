@@ -1,26 +1,61 @@
-"""Prometheus metrics and the ASGI middleware that records them.
+"""Prometheus metrics, the ASGI middleware that records them, and ``/metrics``.
 
 Exposes the RED signals for every route:
 
 * ``http_requests_total``            - Rate and Errors, split by status code.
 * ``http_request_duration_seconds``  - Duration, as a latency histogram.
 * ``http_requests_in_progress``      - A saturation-style in-flight gauge.
-* ``orders_processed_total``         - A custom business counter.
 
-Paths are labelled with the *route template* (``/api/orders/{order_id}``),
-never the raw URL, so cardinality stays bounded no matter how many distinct
-order ids come through. When a request happens inside a sampled trace, the
-latency observation carries a trace-id exemplar, which lets you jump straight
-from a spike on the latency panel to the exact trace that caused it.
+Every label value is bounded:
+
+* ``path`` is the *route template* (``/api/orders/{order_id}``), never the raw
+  URL; unmatched paths collapse to ``"unmatched"``.
+* ``method`` is one of the standard HTTP methods; anything else a client sends
+  (``PROPFIND``, ``X0000`` ...) is recorded as ``_OTHER``, the OpenTelemetry
+  semantic-convention value, so junk methods cannot mint new series.
+* ``status_code`` is the numeric response status.
+
+When a request runs inside a *sampled* trace, the latency observation carries a
+trace-id exemplar, which lets you jump from a spike on the latency panel to the
+exact trace that caused it. Unsampled requests get no exemplar, because their
+trace was never exported and the link would lead nowhere.
+
+This module knows nothing about the demo service: business metrics live next to
+the business code (``app/business_metrics.py``).
 """
 
 from __future__ import annotations
 
+import gzip
 import time
 
 from opentelemetry import trace
-from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, make_asgi_app
+from prometheus_client import (
+    CONTENT_TYPE_LATEST,
+    REGISTRY,
+    CollectorRegistry,
+    Counter,
+    Gauge,
+    Histogram,
+)
+from prometheus_client.exposition import choose_encoder, gzip_accepted
+from starlette.concurrency import run_in_threadpool
+from starlette.requests import Request
+from starlette.responses import Response
 from starlette.routing import Match
+
+__all__ = [
+    "CONTENT_TYPE_LATEST",
+    "IN_PROGRESS",
+    "OTHER_METHOD",
+    "REQUESTS",
+    "REQUEST_DURATION",
+    "STANDARD_METHODS",
+    "PrometheusMiddleware",
+    "install_metrics_route",
+    "make_metrics_endpoint",
+    "normalize_method",
+]
 
 # --- Metric definitions -----------------------------------------------------
 # prometheus_client appends "_total" to counter names, so we register them
@@ -49,52 +84,55 @@ IN_PROGRESS = Gauge(
     ["method", "path"],
 )
 
-ORDERS_PROCESSED = Counter(
-    "orders_processed",
-    "Business orders processed, labelled by outcome.",
-    ["status"],
+#: The request methods recorded as-is (RFC 9110 plus PATCH from RFC 5789).
+STANDARD_METHODS = frozenset(
+    {"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "CONNECT", "TRACE"}
 )
+#: The label value for any other method, as in the OpenTelemetry HTTP semconv.
+OTHER_METHOD = "_OTHER"
 
-__all__ = [
-    "REQUESTS",
-    "REQUEST_DURATION",
-    "IN_PROGRESS",
-    "ORDERS_PROCESSED",
-    "PrometheusMiddleware",
-    "metrics_asgi_app",
-    "CONTENT_TYPE_LATEST",
-]
+DEFAULT_METRICS_PATH = "/metrics"
+
+
+def normalize_method(method: str | None) -> str:
+    """Map a raw request method onto a bounded label value."""
+
+    return method if method in STANDARD_METHODS else OTHER_METHOD
 
 
 def _resolve_template(scope) -> str:
     """Return the matched route template for a request scope.
 
-    Starlette does not stash the matched route on the scope, so we match the
-    request against the app's routes ourselves. Unmatched paths collapse to a
-    single ``"unmatched"`` label to keep 404 scans from exploding cardinality.
+    Starlette does not stash the matched route on the scope before the router
+    runs, so we match the request against the app's routes ourselves. A route
+    that matches the path but not the method (a 405) still reports its
+    template. Unmatched paths collapse to a single ``"unmatched"`` label to keep
+    404 scans from exploding cardinality.
     """
 
     app = scope.get("app")
-    raw_path = scope.get("path", "")
-    if app is None:
-        return raw_path or "unknown"
+    if app is None or not hasattr(app, "routes"):
+        return "unmatched"
 
     partial: str | None = None
     for route in app.routes:
         match, _child_scope = route.matches(scope)
         if match == Match.FULL:
-            return getattr(route, "path", raw_path)
+            return getattr(route, "path", "unmatched")
         if match == Match.PARTIAL and partial is None:
-            partial = getattr(route, "path", raw_path)
+            partial = getattr(route, "path", None)
     return partial or "unmatched"
 
 
 def _current_exemplar() -> dict[str, str] | None:
-    """Return a ``{"trace_id": ...}`` exemplar if a valid span is active."""
+    """Return a ``{"trace_id": ...}`` exemplar if a *sampled* span is active.
 
-    span = trace.get_current_span()
-    ctx = span.get_span_context()
-    if ctx is not None and ctx.is_valid:
+    An unsampled span still has a valid trace id, but nothing about it is ever
+    exported, so an exemplar pointing at it would be a dead link in Grafana.
+    """
+
+    ctx = trace.get_current_span().get_span_context()
+    if ctx is not None and ctx.is_valid and ctx.trace_flags.sampled:
         return {"trace_id": format(ctx.trace_id, "032x")}
     return None
 
@@ -107,24 +145,27 @@ class PrometheusMiddleware:
     lets us read the active trace id for exemplars.
     """
 
-    def __init__(self, app) -> None:
+    def __init__(self, app, excluded_paths: tuple[str, ...] | None = None) -> None:
         self.app = app
+        if excluded_paths is None:
+            excluded_paths = (DEFAULT_METRICS_PATH,)
+        # Never measure the scrape endpoint itself, with or without a slash.
+        self.excluded_paths = frozenset(
+            variant
+            for path in excluded_paths
+            for variant in (path.rstrip("/") or "/", path.rstrip("/") + "/")
+        )
 
     async def __call__(self, scope, receive, send) -> None:
-        if scope["type"] != "http":
+        if scope["type"] != "http" or scope.get("path", "") in self.excluded_paths:
             await self.app(scope, receive, send)
             return
 
-        path = scope.get("path", "")
-        if path == "/metrics" or path.startswith("/metrics/"):
-            # Never measure the scrape endpoint itself.
-            await self.app(scope, receive, send)
-            return
-
-        method = scope.get("method", "GET")
+        method = normalize_method(scope.get("method"))
         template = _resolve_template(scope)
 
-        IN_PROGRESS.labels(method=method, path=template).inc()
+        in_progress = IN_PROGRESS.labels(method=method, path=template)
+        in_progress.inc()
         start = time.perf_counter()
         status_code = 500
 
@@ -139,7 +180,7 @@ class PrometheusMiddleware:
         finally:
             elapsed = time.perf_counter() - start
             code = str(status_code)
-            IN_PROGRESS.labels(method=method, path=template).dec()
+            in_progress.dec()
             REQUESTS.labels(method=method, path=template, status_code=code).inc()
 
             hist = REQUEST_DURATION.labels(method=method, path=template, status_code=code)
@@ -154,12 +195,53 @@ class PrometheusMiddleware:
                 hist.observe(elapsed)
 
 
-def metrics_asgi_app():
-    """Return the Prometheus exposition ASGI app to mount at ``/metrics``.
+def make_metrics_endpoint(
+    registry: CollectorRegistry = REGISTRY,
+    *,
+    disable_compression: bool = False,
+):
+    """Return a Starlette endpoint that serves the Prometheus exposition.
 
-    Using the client's own ASGI app (rather than a hand-rolled route) gives us
-    OpenMetrics content negotiation for free, which is what carries exemplars
-    to Prometheus.
+    It keeps everything ``prometheus_client``'s own ASGI app does - ``Accept``
+    negotiation between the text format and OpenMetrics (the only format that
+    carries exemplars), gzip, and ``?name[]=`` filtering - but is served as a
+    plain route, so ``GET /metrics`` answers ``200`` instead of the ``307``
+    redirect a ``Mount`` produces. Rendering runs in the threadpool so a large
+    registry never blocks the event loop.
     """
 
-    return make_asgi_app()
+    async def metrics(request: Request) -> Response:
+        accept = ",".join(request.headers.getlist("accept"))
+        accept_encoding = ",".join(request.headers.getlist("accept-encoding"))
+        names = request.query_params.getlist("name[]")
+
+        def render() -> tuple[bytes, str]:
+            encoder, content_type = choose_encoder(accept)
+            target = registry.restricted_registry(names) if names else registry
+            return encoder(target), content_type
+
+        body, content_type = await run_in_threadpool(render)
+        headers = {"Content-Type": content_type, "Vary": "Accept, Accept-Encoding"}
+        if not disable_compression and gzip_accepted(accept_encoding):
+            body = gzip.compress(body)
+            headers["Content-Encoding"] = "gzip"
+        return Response(content=body, headers=headers)
+
+    return metrics
+
+
+def install_metrics_route(
+    app,
+    path: str = DEFAULT_METRICS_PATH,
+    registry: CollectorRegistry = REGISTRY,
+) -> None:
+    """Serve the Prometheus exposition at ``path`` (and ``path/``) on ``app``.
+
+    Both spellings are registered as real routes so neither ever redirects:
+    scrapers, ``curl`` without ``-L`` and health probes all get the payload.
+    """
+
+    endpoint = make_metrics_endpoint(registry)
+    base = path.rstrip("/") or "/"
+    for variant in dict.fromkeys((base, base.rstrip("/") + "/")):
+        app.add_route(variant, endpoint, methods=["GET"], include_in_schema=False)

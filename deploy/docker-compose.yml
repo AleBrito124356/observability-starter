@@ -1,5 +1,11 @@
-# The full observability stack: app + collector + prometheus + tempo + grafana.
-# All images are pinned. From this directory:  docker compose up --build
+# The full observability stack: app + collector + prometheus + tempo + loki + grafana.
+# All third-party images are pinned. From the repo root:
+#   docker compose -f deploy/docker-compose.yml up --build -d
+#
+# Signal flow:
+#   traces  app --OTLP--> collector --OTLP--> tempo --(metrics generator)--> prometheus
+#   logs    app --OTLP--> collector --OTLP/HTTP--> loki      (and JSON on stdout)
+#   metrics prometheus --scrape--> app /metrics, collector, tempo, loki
 name: observability-starter
 
 services:
@@ -11,16 +17,20 @@ services:
     container_name: obs_app
     environment:
       SERVICE_NAME: observability-starter
-      SERVICE_VERSION: "0.1.0"
+      SERVICE_VERSION: "0.2.0"
       ENVIRONMENT: docker
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       OTEL_EXPORTER_OTLP_INSECURE: "true"
+      OTEL_EXPORTER_OTLP_PROTOCOL: grpc
       OTEL_TRACES_EXPORTER: otlp
+      # Ship logs over OTLP as well, so they reach Loki with trace_id/span_id.
+      OTEL_LOGS_EXPORTER: otlp
       TRACE_SAMPLE_RATIO: "1.0"
       LOG_JSON: "true"
       LOG_LEVEL: INFO
-      # Self-call so httpx spans appear without needing the public internet.
-      UPSTREAM_URL: http://localhost:8000/health
+      # Self-call so httpx CLIENT spans (and a propagated SERVER span, hence a
+      # service-graph edge) appear without needing the public internet.
+      UPSTREAM_URL: http://localhost:8000/
       FAILURE_RATE: "0.12"
     ports:
       - "8000:8000"
@@ -48,6 +58,7 @@ services:
       - "8888:8888"   # collector self-metrics (scraped by Prometheus)
     depends_on:
       - tempo
+      - loki
 
   tempo:
     image: grafana/tempo:2.6.1
@@ -59,12 +70,23 @@ services:
     ports:
       - "3200:3200"   # Tempo API + /metrics
 
+  loki:
+    image: grafana/loki:3.2.1
+    container_name: obs_loki
+    command: ["-config.file=/etc/loki/loki.yaml"]
+    volumes:
+      - ./loki.yaml:/etc/loki/loki.yaml:ro
+    ports:
+      - "3100:3100"   # Loki API (+ native OTLP ingestion at /otlp) + /metrics
+
   prometheus:
     image: prom/prometheus:v2.54.1
     container_name: obs_prometheus
     command:
       - --config.file=/etc/prometheus/prometheus.yml
       - --enable-feature=exemplar-storage
+      # Tempo's metrics generator remote-writes service-graph and span metrics.
+      - --web.enable-remote-write-receiver
       - --storage.tsdb.retention.time=2h
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
@@ -89,6 +111,7 @@ services:
     depends_on:
       - prometheus
       - tempo
+      - loki
 
 volumes:
   tempo_data:

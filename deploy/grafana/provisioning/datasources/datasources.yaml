@@ -1,11 +1,23 @@
-# Grafana datasources, provisioned on startup.
-# The exemplarTraceIdDestinations block is what turns the "trace_id" exemplar
-# on the latency histogram into a clickable link to the trace in Tempo.
+# Grafana datasources, provisioned on startup. They are wired to each other so
+# every pivot is one click:
+#
+#   metrics -> trace   Prometheus exemplarTraceIdDestinations: the "trace_id"
+#                      exemplar on the latency histogram links to Tempo.
+#   trace   -> logs    Tempo tracesToLogsV2: "Logs for this span" opens Loki
+#                      filtered on the trace id (structured metadata).
+#   logs    -> trace   Loki derivedFields: the trace_id of a log line links
+#                      back to Tempo.
+#   trace   -> graph   Tempo serviceMap: service graph from the metrics that
+#                      Tempo's metrics generator remote-writes to Prometheus.
+#
+# Grafana expands $VAR / ${VAR} from the environment in these files, so the
+# literal Grafana macros below are escaped as $${...}.
 apiVersion: 1
 
 deleteDatasources:
   - name: Prometheus
   - name: Tempo
+  - name: Loki
 
 datasources:
   - name: Prometheus
@@ -34,3 +46,32 @@ datasources:
         enabled: true
       tracesToMetrics:
         datasourceUid: prometheus
+      lokiSearch:
+        datasourceUid: loki
+      tracesToLogsV2:
+        datasourceUid: loki
+        spanStartTimeShift: "-5m"
+        spanEndTimeShift: "5m"
+        tags:
+          - key: service.name
+            value: service_name
+        filterByTraceID: false
+        filterBySpanID: false
+        customQuery: true
+        query: '{$${__tags}} | trace_id="$${__trace.traceId}"'
+
+  - name: Loki
+    type: loki
+    uid: loki
+    access: proxy
+    url: http://loki:3100
+    jsonData:
+      maxLines: 1000
+      derivedFields:
+        - name: TraceID
+          # Match the trace_id structured-metadata field (not a regex over the line).
+          matcherType: label
+          matcherRegex: trace_id
+          datasourceUid: tempo
+          url: "$${__value.raw}"
+          urlDisplayLabel: View trace

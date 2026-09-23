@@ -14,4 +14,6 @@ COPY app ./app
 
 EXPOSE 8000
 
+# The app writes its own structured, trace-correlated "request.completed" line
+# per request and silences uvicorn's plain-text access line (LOG_REQUESTS=true).
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

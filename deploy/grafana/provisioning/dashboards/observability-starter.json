@@ -292,6 +292,83 @@
           "format": "heatmap"
         }
       ]
+    },
+    {
+      "id": 8,
+      "type": "logs",
+      "title": "Logs for this service",
+      "description": "Every log line the service shipped over OTLP, from Loki. Expand a line and click 'View trace' on its trace_id to open the trace in Tempo.",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "h": 10, "w": 16, "x": 0, "y": 24 },
+      "options": {
+        "showTime": true,
+        "showLabels": false,
+        "showCommonLabels": false,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": false,
+        "enableLogDetails": true,
+        "dedupStrategy": "none",
+        "sortOrder": "Descending"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "loki", "uid": "loki" },
+          "expr": "{service_name=\"observability-starter\"}",
+          "queryType": "range"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Warning and error log rate",
+      "description": "Log lines per second at WARN or above, by severity, from Loki's structured metadata.",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "h": 10, "w": 8, "x": 16, "y": 24 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 60,
+            "lineWidth": 1,
+            "showPoints": "never",
+            "stacking": { "mode": "normal", "group": "A" }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "calcs": [] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "loki", "uid": "loki" },
+          "expr": "sum by (severity_text) (rate({service_name=\"observability-starter\"} | severity_text=~\"WARN|ERROR|FATAL\" [$__auto]))",
+          "legendFormat": "{{severity_text}}",
+          "queryType": "range"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "nodeGraph",
+      "title": "Service graph",
+      "description": "Built by Tempo's metrics generator from the traces and remote-written to Prometheus: the app, its self-call edge and the virtual database node behind db.query.",
+      "datasource": { "type": "tempo", "uid": "tempo" },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 34 },
+      "options": {},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "tempo", "uid": "tempo" },
+          "queryType": "serviceMap"
+        }
+      ]
     }
   ]
 }
