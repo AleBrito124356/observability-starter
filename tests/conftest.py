@@ -1,26 +1,35 @@
 """Shared pytest fixtures.
 
 The key trick: install a ``TracerProvider`` backed by an in-memory span
-exporter *before* the application is imported. ``configure_tracing`` reuses an
-existing real provider instead of creating an OTLP one, so every span the app
-produces lands in ``MEMORY_EXPORTER`` where the tests can inspect it - no
-collector required.
+exporter *before* any app is built. ``configure_tracing`` reuses an existing
+real provider instead of creating an OTLP one, so every span the app produces
+lands in ``MEMORY_EXPORTER`` where the tests can inspect it - no collector
+required. (Importing ``app.main`` builds nothing, so import order is free.)
 """
 
 from __future__ import annotations
 
+import io
+import json
+import logging
 import os
 
 # Belt and braces: even if a fresh provider were built, don't try to export.
 os.environ.setdefault("OTEL_TRACES_EXPORTER", "none")
 
-from opentelemetry import trace  # noqa: E402
-from opentelemetry.sdk.resources import Resource  # noqa: E402
-from opentelemetry.sdk.trace import TracerProvider  # noqa: E402
-from opentelemetry.sdk.trace.export import SimpleSpanProcessor  # noqa: E402
-from opentelemetry.sdk.trace.export.in_memory_span_exporter import (  # noqa: E402
+import pytest
+import structlog
+from fastapi.testclient import TestClient
+from opentelemetry import trace
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
     InMemorySpanExporter,
 )
+
+from app.config import Settings
+from app.main import create_app
 
 MEMORY_EXPORTER = InMemorySpanExporter()
 
@@ -31,17 +40,6 @@ if not isinstance(_provider, TracerProvider):
     )
     _provider.add_span_processor(SimpleSpanProcessor(MEMORY_EXPORTER))
     trace.set_tracer_provider(_provider)
-
-import io  # noqa: E402
-import json  # noqa: E402
-import logging  # noqa: E402
-
-import pytest  # noqa: E402
-import structlog  # noqa: E402
-from fastapi.testclient import TestClient  # noqa: E402
-
-from app.config import Settings  # noqa: E402
-from app.main import create_app  # noqa: E402
 
 _STDLIB_LOGGERS = ("uvicorn", "uvicorn.error", "uvicorn.access")
 

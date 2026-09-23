@@ -96,7 +96,7 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     log_json: bool = True
     # One structured, trace-correlated "request.completed" line per request.
-    # (Run uvicorn with --no-access-log to avoid its plain-text duplicate.)
+    # While on, uvicorn's own plain-text access log is silenced (no duplicates).
     log_requests: bool = True
 
     # --- Demo behaviour knobs ---

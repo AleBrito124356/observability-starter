@@ -125,7 +125,7 @@ def configure_logging(settings, *, stream=None) -> None:
         renderer = structlog.dev.ConsoleRenderer(colors=True)
 
     structlog.configure(
-        processors=processors + [structlog.stdlib.ProcessorFormatter.wrap_for_formatter],
+        processors=[*processors, structlog.stdlib.ProcessorFormatter.wrap_for_formatter],
         logger_factory=structlog.stdlib.LoggerFactory(),
         wrapper_class=structlog.stdlib.BoundLogger,
         cache_logger_on_first_use=True,
@@ -148,10 +148,19 @@ def configure_logging(settings, *, stream=None) -> None:
 
     # Let uvicorn's loggers bubble up to the root handler instead of using their
     # own, so their output is JSON too.
-    for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+    for name in ("uvicorn", "uvicorn.error"):
         logger = logging.getLogger(name)
         logger.handlers = []
         logger.propagate = True
+
+    # uvicorn only writes access lines when "uvicorn.access" has handlers
+    # (directly or through propagation). When the app writes its own
+    # structured, trace-correlated request.completed line (LOG_REQUESTS=true,
+    # the default), silence uvicorn's plain-text duplicate at the source;
+    # otherwise route it through the JSON handler like everything else.
+    access = logging.getLogger("uvicorn.access")
+    access.handlers = []
+    access.propagate = not getattr(settings, "log_requests", True)
 
 
 # --- OTLP log export ------------------------------------------------------------

@@ -59,7 +59,7 @@ class Received:
 
 def _http_collector(received: Received):
     class Handler(BaseHTTPRequestHandler):
-        def do_POST(self) -> None:  # noqa: N802 - stdlib naming
+        def do_POST(self) -> None:
             body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
             if self.path == "/v1/traces":
                 request = trace_service_pb2.ExportTraceServiceRequest()
@@ -96,12 +96,12 @@ def _grpc_collector(received: Received):
     from opentelemetry.proto.collector.trace.v1 import trace_service_pb2_grpc
 
     class Traces(trace_service_pb2_grpc.TraceServiceServicer):
-        def Export(self, request, context):  # noqa: N802 - generated API
+        def Export(self, request, context):
             received.add_traces(request)
             return trace_service_pb2.ExportTraceServiceResponse()
 
     class Logs(logs_service_pb2_grpc.LogsServiceServicer):
-        def Export(self, request, context):  # noqa: N802 - generated API
+        def Export(self, request, context):
             received.add_logs(request)
             return logs_service_pb2.ExportLogsServiceResponse()
 

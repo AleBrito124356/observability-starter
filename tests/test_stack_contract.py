@@ -15,12 +15,12 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import pytest
+import yaml
 from prometheus_client import REGISTRY
 
-yaml = pytest.importorskip("yaml")
-
-import app.business_metrics  # noqa: E402,F401 - registers the business counter
-import app.telemetry.metrics  # noqa: E402,F401 - registers the RED metrics
+# Importing these registers the app's metrics in the default registry.
+import app.business_metrics
+import app.telemetry.metrics  # noqa: F401
 
 DEPLOY = Path(__file__).resolve().parents[1] / "deploy"
 PROVISIONING = DEPLOY / "grafana" / "provisioning"
@@ -269,7 +269,8 @@ def test_prometheus_scrape_targets_resolve_to_compose_services(compose):
 
 
 def test_collector_pipelines_use_only_declared_components(collector):
-    declared = {kind: set(collector.get(kind, {})) for kind in ("receivers", "processors", "exporters")}
+    kinds = ("receivers", "processors", "exporters")
+    declared = {kind: set(collector.get(kind, {})) for kind in kinds}
     pipelines = collector["service"]["pipelines"]
     assert {"traces", "logs"} <= set(pipelines)
     for name, pipeline in pipelines.items():

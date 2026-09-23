@@ -109,7 +109,9 @@ def create_app(
     app = FastAPI(
         title=settings.service_name,
         version=settings.service_version,
-        description="A reference FastAPI service instrumented with the three pillars of observability.",
+        description=(
+            "A reference FastAPI service instrumented with the three pillars of observability."
+        ),
         lifespan=lifespan,
     )
     app.state.settings = settings

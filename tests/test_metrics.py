@@ -122,7 +122,8 @@ def test_unsampled_request_gets_no_exemplar(client):
     # The parent says "not sampled", so the ParentBased sampler drops the whole
     # trace. An exemplar pointing at it would be a dead link in Grafana.
     trace_id = "4bf92f3577b34da6a3ce929d0e0e4736"
-    assert client.get("/", headers={"traceparent": _traceparent(trace_id, False)}).status_code == 200
+    response = client.get("/", headers={"traceparent": _traceparent(trace_id, False)})
+    assert response.status_code == 200
 
     body = client.get("/metrics", headers=_OPENMETRICS).text
     assert "http_request_duration_seconds_bucket" in body

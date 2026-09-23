@@ -79,7 +79,9 @@ def plan_request(rng: random.Random | None = None) -> RequestSpec:
     return RequestSpec(method=method, template=template, path=path, params=params, json=body)
 
 
-async def send_request(client: httpx.AsyncClient, base_url: str, spec: RequestSpec) -> httpx.Response:
+async def send_request(
+    client: httpx.AsyncClient, base_url: str, spec: RequestSpec
+) -> httpx.Response:
     """Send a planned request with ``client``."""
 
     return await client.request(
@@ -173,7 +175,12 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    return run_from_args(build_parser().parse_args(argv))
+
+
+def run_from_args(args: argparse.Namespace) -> int:
+    """Run the generator for parsed arguments (shared by the script and the CLI)."""
+
     if args.duration <= 0 or args.concurrency <= 0:
         print("--duration and --concurrency must be positive", file=sys.stderr)
         return 2

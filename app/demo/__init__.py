@@ -22,7 +22,7 @@ import asyncio
 import json
 import sys
 
-__all__ = ["build_parser", "main"]
+__all__ = ["build_parser", "main", "run_from_args"]
 
 
 def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.ArgumentParser:
@@ -51,7 +51,12 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    return run_from_args(build_parser().parse_args(argv))
+
+
+def run_from_args(args: argparse.Namespace) -> int:
+    """Run the demo for parsed arguments (shared by ``python -m`` and the CLI)."""
+
     if args.requests < 1 or args.concurrency < 1:
         print("--requests and --concurrency must be at least 1", file=sys.stderr)
         return 2

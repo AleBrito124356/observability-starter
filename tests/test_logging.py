@@ -19,7 +19,7 @@ def _capture_logs():
         raise structlog.DropEvent
 
     structlog.configure(
-        processors=shared_processors(get_settings()) + [sink],
+        processors=[*shared_processors(get_settings()), sink],
         cache_logger_on_first_use=False,
     )
     return captured
@@ -196,19 +196,56 @@ def test_configure_logging_writes_one_json_object_per_line(log_capture, capsys):
     assert by_event["uvicorn says hi"]["level"] == "warning"
 
 
+def _uvicorn_after_dictconfig():
+    import logging
+
+    # What uvicorn's LOGGING_CONFIG leaves behind: own handlers, no propagation.
+    for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+        logging.getLogger(name).handlers = [logging.NullHandler()]
+        logging.getLogger(name).propagate = name != "uvicorn.access"
+
+
 def test_uvicorn_loggers_propagate_to_the_json_handler(log_capture):
     import logging
 
     from app.telemetry.logging import configure_logging
     from tests.conftest import make_settings
 
-    logging.getLogger("uvicorn.access").handlers = [logging.NullHandler()]
-    logging.getLogger("uvicorn.access").propagate = False
+    _uvicorn_after_dictconfig()
     configure_logging(make_settings(), stream=log_capture.buffer)
-    for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+    for name in ("uvicorn", "uvicorn.error"):
         assert logging.getLogger(name).handlers == []
         assert logging.getLogger(name).propagate is True
-    logging.getLogger("uvicorn.access").info("GET / 200")
+    logging.getLogger("uvicorn.error").info("Application startup complete.")
+    assert log_capture()[-1]["event"] == "Application startup complete."
+
+
+def test_uvicorn_access_log_is_silenced_while_the_app_logs_requests(log_capture):
+    import logging
+
+    from app.telemetry.logging import configure_logging
+    from tests.conftest import make_settings
+
+    _uvicorn_after_dictconfig()
+    configure_logging(make_settings(), stream=log_capture.buffer)
+    access = logging.getLogger("uvicorn.access")
+    # uvicorn checks hasHandlers() once per connection and skips access lines.
+    assert access.hasHandlers() is False
+    access.info("GET / 200")
+    assert log_capture() == []
+
+
+def test_uvicorn_access_log_is_json_when_request_logging_is_off(log_capture):
+    import logging
+
+    from app.telemetry.logging import configure_logging
+    from tests.conftest import make_settings
+
+    _uvicorn_after_dictconfig()
+    configure_logging(make_settings(log_requests=False), stream=log_capture.buffer)
+    access = logging.getLogger("uvicorn.access")
+    assert access.hasHandlers() is True
+    access.info("GET / 200")
     assert log_capture()[-1]["event"] == "GET / 200"
 
 

@@ -191,7 +191,7 @@ def test_external_call_propagates_traceparent_from_a_client_span(span_exporter):
     spans = span_exporter.get_finished_spans()
     client_span = next(s for s in spans if s.kind == SpanKind.CLIENT and s.name.startswith("GET"))
     aggregate = next(s for s in spans if s.name == "external.aggregate")
-    version, trace_id, parent_id, flags = seen["traceparent"].split("-")
+    _version, trace_id, parent_id, flags = seen["traceparent"].split("-")
     assert trace_id == format(client_span.context.trace_id, "032x")
     assert parent_id == format(client_span.context.span_id, "016x")
     assert int(flags, 16) & 0x01, "the sampled flag must be propagated"
@@ -209,7 +209,8 @@ def test_external_upstream_failure_is_a_502_with_one_recorded_error(span_exporte
     response = TestClient(_external_app(upstream)).get("/api/external")
     assert response.status_code == 502
 
-    aggregate = next(s for s in span_exporter.get_finished_spans() if s.name == "external.aggregate")
+    spans = span_exporter.get_finished_spans()
+    aggregate = next(s for s in spans if s.name == "external.aggregate")
     assert aggregate.status.status_code.name == "ERROR"
     assert aggregate.status.description == "upstream request failed"
     exceptions = [e for e in aggregate.events if e.name == "exception"]
